@@ -187,8 +187,9 @@ banner, no retry signal -- silently mislabeled data.
   In a ledger copy, give one subscription model some rows with a cache
   write of unknown lifetime and some fully priced rows, and give another
   subscription model only rows with a reasoning count and no persisted
-  provider kind. On Traffic by model, the first reads `~$<n> partial`, the
-  mark's tooltip saying `priced subtotal only: leaves out usage that has no
+  provider kind. On Traffic by model, the first reads `~$<n> partial` (the
+  `~` as large and bright as the number), a screen reader saying the word
+  apart from the figure, the mark's tooltip saying `priced subtotal only: leaves out usage that has no
   price`; the second reads a faint `unpriced`, never `-`; a priced API-key
   model keeps `-`. The Now EST. COST tile's `At API prices` and each
   Accounts `traffic` line read the same way. Opening the first model's row

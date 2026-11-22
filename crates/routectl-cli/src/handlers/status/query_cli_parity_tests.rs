@@ -638,6 +638,60 @@ fn a_part_split_write_group_reads_partial_on_both_sides() {
     assert!(line.contains(" partial"), "{line}");
 }
 
+#[test]
+fn an_unpriced_non_subscription_model_leaves_the_equivalent_unmarked_on_both_sides() {
+    // Arrange
+    let fx = fixture();
+
+    // Act
+    let endpoint = endpoint_result(&fx, "all", "seat");
+    let cli = cli_report_with(&fx, "--all", Some(GroupDim::Seat), true);
+    let out = render_report(&cli, &zone());
+
+    // Assert: the unseated group mixes the fully priced subscription model
+    // with the forwarded one no source prices, and the totals add the
+    // unpriced API-key model; neither gap marks the equivalent.
+    let endpoint_unseated = &endpoint
+        .groups
+        .iter()
+        .find(|g| g.label == "(unattributed)")
+        .expect("endpoint unseated group")
+        .metrics;
+    let cli_unseated = &cli
+        .groups
+        .iter()
+        .find(|row| row.label == "(unattributed)")
+        .expect("cli unseated row")
+        .metrics;
+    let cases = [
+        ("(unattributed)", endpoint_unseated, cli_unseated, "relayed"),
+        ("total", &endpoint.totals, &cli.total.metrics, "haiku"),
+    ];
+    for (label, endpoint_m, cli_m, unpriced_model) in cases {
+        assert_eq!(cli_m, endpoint_m, "{label}");
+        assert_eq!(
+            endpoint_m.equivalent_status,
+            routectl_usage::EquivalentStatus::Complete,
+            "{label}"
+        );
+        assert!(
+            endpoint_m
+                .missing_prices
+                .iter()
+                .any(|gap| gap.model == unpriced_model),
+            "{label}: the {unpriced_model} gap is listed: {:?}",
+            endpoint_m.missing_prices
+        );
+        let usd = endpoint_m.equivalent_cost_usd.expect("an equivalent");
+        let line = out
+            .lines()
+            .find(|l| l.split_whitespace().next() == Some(label))
+            .unwrap_or_else(|| panic!("rendered `{label}` row in\n{out}"));
+        let shown = format!("~${})", dashboard_money(usd));
+        assert!(line.contains(&shown), "{label}: `{shown}` in {line}");
+    }
+}
+
 /// The six timing percentiles of a metric set.
 fn percentiles(m: &QueryMetrics) -> [Option<i64>; 6] {
     [

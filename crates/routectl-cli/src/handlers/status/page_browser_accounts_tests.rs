@@ -547,6 +547,12 @@ fn page_browser_accounts_traffic_cost_names_an_equivalent_as_one() {
 
     assert_eq!(out["seat"]["cost"], Value::Null, "{out:#}");
     assert_eq!(out["seat"]["alt"], "~$1.23At API prices", "{out:#}");
+    let approx = &out["seat"]["alt_approx"];
+    assert_eq!(approx["text"], "~", "{out:#}");
+    assert_eq!(
+        approx["tilde"], approx["number"],
+        "the tilde is drawn like its number: {out:#}"
+    );
     assert_eq!(out["api_key"]["cost"], "$0.500", "{out:#}");
     assert_eq!(out["api_key"]["alt"], Value::Null, "{out:#}");
     assert_eq!(
@@ -573,7 +579,7 @@ fn page_browser_accounts_an_equivalent_that_leaves_rows_out_says_so() {
     assert_eq!(
         out["seat"]["alt_mark_spoken"],
         json!({
-            "text": "partial (priced subtotal only: leaves out usage that has no price)",
+            "text": " partial (priced subtotal only: leaves out usage that has no price)",
             "hidden_part_hidden": true
         }),
         "the mark's reason reaches a keyboard and a screen reader: {out:#}"

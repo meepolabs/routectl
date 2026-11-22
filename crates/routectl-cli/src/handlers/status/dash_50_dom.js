@@ -735,9 +735,18 @@
   // A big figure: the numeral plus an optional faint unit slot on either side
   // (a leading one for a currency mark, a trailing one for a magnitude). A zero
   // or absent value de-emphasizes whole -- a zero is faint, never an error.
+  // A leading `~` says the number itself is an estimate, so it is drawn at the
+  // numeral's size and color, never faint in the unit slot.
   function figure(text, unit, pre) {
     var span = markValue(document.createElement('span'), (pre || '') + text + (unit || ''));
     if (text === '-' || text === '0' || text === '0.00') { span.classList.add('mag-zero'); }
+    if (pre && pre.charAt(0) === '~') {
+      var approx = document.createElement('span');
+      approx.className = 'fig-approx';
+      approx.textContent = '~';
+      span.appendChild(approx);
+      pre = pre.slice(1);
+    }
     if (pre) { span.appendChild(unitSlot(pre)); }
     span.appendChild(document.createTextNode(text));
     if (unit) { span.appendChild(unitSlot(unit)); }

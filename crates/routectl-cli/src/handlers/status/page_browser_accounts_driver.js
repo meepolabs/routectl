@@ -266,6 +266,7 @@
       req: textIn(line, '.acct-traffic-req'),
       cost: textIn(line, '.acct-traffic-cost'),
       alt: d.shownText(line.querySelector('.acct-traffic-alt')),
+      alt_approx: d.approxType(line.querySelector('.acct-traffic-alt > span')),
       alt_mark: d.shownText(line.querySelector('.acct-traffic-alt .cost-mark')),
       alt_mark_spoken: d.spokenMark(line.querySelector('.acct-traffic-alt .cost-mark')),
       alt_faint: !!line.querySelector('.acct-traffic-alt .mag-zero'),

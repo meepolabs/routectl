@@ -836,17 +836,23 @@
   // The visible word beside a figure that is a subtotal, with why in its
   // title for a pointer and as visually hidden text for everyone else: the
   // mark takes no focus, so a title alone never reaches a keyboard or a
-  // screen reader.
+  // screen reader. The visible gap is a margin, which text does not carry, so
+  // a hidden space keeps the word apart from the figure when read as text.
   function costMark(title) {
     var mark = document.createElement('span');
     mark.className = 'cost-mark';
+    mark.appendChild(srOnlyText(' '));
     mark.appendChild(document.createTextNode(labelFor('cost', 'partial').label));
-    var why = document.createElement('span');
-    why.className = 'sr-only';
-    why.textContent = ' (' + title + ')';
-    mark.appendChild(why);
+    mark.appendChild(srOnlyText(' (' + title + ')'));
     mark.title = title;
     return mark;
+  }
+
+  function srOnlyText(text) {
+    var span = document.createElement('span');
+    span.className = 'sr-only';
+    span.textContent = text;
+    return span;
   }
 
   // An equivalent no subscription row could be priced into: the word, faint,

@@ -5073,8 +5073,11 @@ dimension with no price (it is named in `missing_price_dimensions`), so
 one, and is `null` when none did. A present `equivalent_cost_usd` is
 therefore not by itself complete: read `equivalent_status`. A request whose
 only unpriced usage is cache writes with no recorded lifetime adds the value
-of the rest of its usage and makes the set `partial`. Totals are `partial`
-when any group is.
+of the rest of its usage and makes the set `partial`. Only subscription
+requests can make the set `partial`: a missing price on any other request
+(for example a passthrough step under the same alias) is listed in
+`missing_prices` but leaves `equivalent_status` as it was. Totals are
+`partial` when any group is.
 
 The groups and `totals` are priced over the whole window, and are the same
 whether or not a `bucket` series was requested. Each series bucket is priced

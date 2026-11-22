@@ -194,6 +194,7 @@
       value: textOr(tile, '.kpi-value'),
       alt_label: textOr(tile, '.kpi-alt-label'),
       alt_value: d.shownText(tile.querySelector('.kpi-alt-value')),
+      alt_approx: d.approxType(tile.querySelector('.kpi-alt-value')),
       alt_note: textOr(tile, '.kpi-alt-note'),
       alt_mark: d.shownText(tile.querySelector('.kpi-alt-value .cost-mark')),
       alt_mark_spoken: d.spokenMark(tile.querySelector('.kpi-alt-value .cost-mark')),

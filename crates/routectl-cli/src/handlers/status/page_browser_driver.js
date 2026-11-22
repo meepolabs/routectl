@@ -188,6 +188,18 @@
     };
   }
 
+  // The type of a figure's leading `~` beside the type of its numeral (the
+  // figure's own text). Null for no figure or no `~`.
+  function approxType(fig) {
+    var tilde = fig && fig.querySelector('.fig-approx');
+    if (!tilde) { return null; }
+    var styleOf = function (node) {
+      var cs = getComputedStyle(node);
+      return { size: cs.fontSize, color: cs.color };
+    };
+    return { text: tilde.textContent, tilde: styleOf(tilde), number: styleOf(fig) };
+  }
+
   var api = {
     scenario: function (name, fn) { scenarios[name] = fn; },
     hold: function (rule) { holdRules.push(rule); },
@@ -200,7 +212,8 @@
     acrossRounds: acrossRounds,
     pressSelectAll: pressSelectAll,
     shownText: shownText,
-    spokenMark: spokenMark
+    spokenMark: spokenMark,
+    approxType: approxType
   };
   window.routectlDriver = api;
 })();

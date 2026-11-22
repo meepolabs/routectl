@@ -478,6 +478,8 @@ list with more narrative.
 
 ### Changed
 
+- **The dashboard draws the `~` of an "At API prices" figure as large as its number, and reads its `partial` mark apart from it.** On Traffic, the Now EST. COST tile and Accounts, the tilde before an API-price figure now has the number's size and color instead of the faint currency-mark style, so the figure no longer reads as a plain dollar amount; the `$` of real cost figures is unchanged. A screen reader, or a copy of the text, now reads a marked figure as `~$268.29 partial (...)` instead of running the figure and the word together; the visible layout is unchanged.
+
 - **The dashboard Doctor tab leads with the needs-attention list.** Doctor now shows the same list as Now, and its one headline number is that list's count, the same number the tab badge shows; the old Fail/Warn/Pass verdict card is gone (the findings below it are unchanged). A line names the model problems the Models view lists, as problems and as lanes, with a link to Models. Commands quoted in a finding's remediation show as focusable code without their backticks.
 
 - **The dashboard Config tab shows seat pools and prices as written.** A Pools card lists each pool's seat selection and its members by provider entry and login label. Price labels keep the config's spelling, so a cache lifetime reads 5m, 30m or 1h rather than 30M, cache-write prices come in duration order, and each price sits under its label so a model's prices wrap evenly at narrower widths.

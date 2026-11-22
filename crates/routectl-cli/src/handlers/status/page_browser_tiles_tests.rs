@@ -174,6 +174,22 @@ fn page_browser_tiles_cost_tile_keeps_spend_and_api_price_apart() {
     assert!(no_equiv["alt_value"].is_null(), "{no_equiv:#}");
 }
 
+/// The `~` of the "At API prices" figure qualifies the number, so it is drawn
+/// at the number's size and color, not faint in the unit slot the `$` uses.
+///
+/// Mutation check: the tilde left in the `$` unit slot in figure -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_tiles_the_api_price_tilde_reads_as_large_as_its_number() {
+    let rounds = run("tiles-cost-equivalent");
+    let both = &rounds[0];
+
+    let approx = &both["alt_approx"];
+    assert_eq!(approx["text"], "~", "{both:#}");
+    assert_eq!(approx["tilde"], approx["number"], "{both:#}");
+    assert!(approx["number"]["size"].is_string(), "{both:#}");
+}
+
 /// The tile's "At API prices" figure says when it leaves some subscription
 /// traffic out, as the server's `equivalent_status` says: a `partial`
 /// equivalent carries the `partial` mark and its title, a `complete` one
@@ -207,7 +223,7 @@ fn page_browser_tiles_an_equivalent_that_leaves_rows_out_says_so() {
     assert_eq!(
         partial["alt_mark_spoken"],
         json!({
-            "text": "partial (priced subtotal only: leaves out usage that has no price)",
+            "text": " partial (priced subtotal only: leaves out usage that has no price)",
             "hidden_part_hidden": true
         }),
         "the mark's reason reaches a keyboard and a screen reader: {partial:#}"

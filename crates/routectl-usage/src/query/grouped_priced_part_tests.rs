@@ -225,3 +225,48 @@ fn the_equivalent_status_tokens_are_the_wire_tokens() {
         assert_eq!(status.as_str(), token);
     }
 }
+
+#[test]
+fn an_unpriced_passthrough_step_leaves_an_alias_equivalent_complete() {
+    let priced_steps = [
+        ("u-a", "m1", sub(Some(2.0), &[])),
+        ("u-b", "m1", sub(Some(3.0), &[])),
+        (
+            "u-c",
+            "m2",
+            RowCost::Unpriced(vec!["input".to_string(), "output".to_string()]),
+        ),
+    ];
+    let mut with_sub_gap = priced_steps.to_vec();
+    with_sub_gap.push(("u-d", "m1", sub(Some(1.0), &["input"])));
+    let cases = [
+        (
+            "passthrough gap only",
+            priced_steps.to_vec(),
+            EquivalentStatus::Complete,
+            Some(5.0),
+        ),
+        (
+            "passthrough gap and a subscription gap",
+            with_sub_gap,
+            EquivalentStatus::Partial,
+            Some(6.0),
+        ),
+    ];
+    for (name, rows, expected, equivalent) in cases {
+        // Act: both steps land in the one alias group.
+        let result = query_equivalent_rows(&rows, GroupDim::Alias);
+
+        // Assert: the passthrough gap is still listed as a missing price.
+        let m = &group(&result, "al").metrics;
+        assert_eq!(m.equivalent_status, expected, "{name}");
+        assert_eq!(m.equivalent_cost_usd, equivalent, "{name}");
+        assert!(
+            m.missing_prices
+                .iter()
+                .any(|gap| gap.model == "m2" && gap.dimension == "input"),
+            "{name}: {:?}",
+            m.missing_prices
+        );
+    }
+}

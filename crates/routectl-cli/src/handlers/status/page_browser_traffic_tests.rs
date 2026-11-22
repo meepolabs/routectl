@@ -759,12 +759,17 @@ fn page_browser_traffic_an_unknown_cost_never_reads_as_zero() {
     assert_eq!(subtotal["cost_mark"], "partial", "{subtotal:#}");
     assert_eq!(
         subtotal["cost_mark_spoken"],
-        json!({"text": "partial (priced subtotal only)", "hidden_part_hidden": true}),
+        json!({"text": " partial (priced subtotal only)", "hidden_part_hidden": true}),
         "the mark's reason reaches a keyboard and a screen reader: {subtotal:#}"
     );
     let priced = row(&out, "model-03");
     assert_eq!(priced["cost"], "$1.50", "positive control: {priced:#}");
     assert_eq!(priced["cost_mark"], Value::Null, "{priced:#}");
+    assert_eq!(
+        priced["cost_approx"],
+        Value::Null,
+        "a real cost has no tilde: {priced:#}"
+    );
     assert_eq!(row(&out, "model-04")["cost"], "subscription", "{out:#}");
     for r in out["rows"].as_array().expect("rows") {
         assert_ne!(r["cost"], "$0.00", "{r:#}");
@@ -841,13 +846,24 @@ fn page_browser_traffic_an_equivalent_that_leaves_rows_out_says_so() {
     assert_eq!(
         partial["equivalent_mark_spoken"],
         json!({
-            "text": format!("partial ({EQUIVALENT_PARTIAL_TITLE})"),
+            "text": format!(" partial ({EQUIVALENT_PARTIAL_TITLE})"),
             "hidden_part_hidden": true
         }),
         "the mark's reason reaches a keyboard and a screen reader: {partial:#}"
     );
+    assert_eq!(
+        partial["equivalent_spoken"],
+        format!("~$268.29 partial ({EQUIVALENT_PARTIAL_TITLE})"),
+        "read as text, the word stands apart from the figure: {partial:#}"
+    );
     let full = row(&out, "model-02");
     assert_eq!(full["equivalent"], "~$40.25", "positive control: {full:#}");
+    let approx = &full["equivalent_approx"];
+    assert_eq!(approx["text"], "~", "{full:#}");
+    assert_eq!(
+        approx["tilde"], approx["number"],
+        "the tilde is drawn like its number: {full:#}"
+    );
     assert_eq!(full["equivalent_mark"], Value::Null, "{full:#}");
     let complete_beside_gap = row(&out, "model-07");
     assert_eq!(
