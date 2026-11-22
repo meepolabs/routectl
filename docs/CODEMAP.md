@@ -7868,11 +7868,14 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   promise and the last good read's time above the technical code), contains a builder
   throw in that section's titled error card (`guardedContent`, `safeSection`),
   and records faults in `RENDER_FAULTS` for the badges and status line. Also
-  the state cards, the banner, the verdict strip (`renderVerdict`: the
-  severity, sentence and view target of a current `attention` payload's
+  the state cards, the banner (overload and timeout only: an unreachable
+  daemon clears it, the strip saying so), the verdict strip (`renderVerdict`:
+  the severity, sentence and view target of a current `attention` payload's
   `verdict` via `currentVerdict`; else, through `shownVerdict`, the last one
-  shown with its time and why it is not current; "Checking routing state"
-  only before any verdict; the view link via `syncVerdictLink`), the poll
+  shown with its time and why it is not current, "the daemon cannot be
+  reached" whenever `lastRefreshFailed`; "Checking routing state" only before
+  any verdict, with that note after a failed refresh; the view link via
+  `syncVerdictLink`, omitted for the view already open), the poll
   indicator, and the tab badges (`sourceBadge`; the models badge counts rows
   whose `state` is not `ok` through `modelProblemLanes`, which Doctor's
   model-problems line also reads; the attention badge counts
@@ -7884,9 +7887,12 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   writes `data-action`/`data-arg`; no builder attaches a listener), the shared
   table (`mkTable(id, caption, cols, {expandable, sortable, rowKey})` with
   `sortBy` columns, keyed rows that throw on a duplicate key, nulls last and
-  ties by key), `markRefreshUnit`, the changed-value marks (`markValue`,
-  `markChangedValue`, `clearChangedValue`), the state-dot and token pills, the
-  card / section / figure / share-bar primitives, `emptyCard`, `viewLink`
+  ties by key; `xrow` names a row's toggle by an optional `rowName`, ids
+  always from the key), `markRefreshUnit`, the changed-value marks
+  (`markValue`, `markChangedValue`, `clearChangedValue`), the state-dot and
+  token pills, the card / section / figure / share-bar primitives (`figure`
+  draws a leading `~` as a `fig-approx` span at the numeral's size, never in
+  the faint unit slot), `emptyCard`, `viewLink`
   (a same-page link to a view through the `open-view` action, class
   `view-link`), the shared login
   color rule (`loginKind`, `poolsWithUsableLogin`), `copyableCode` (a focusable
@@ -7908,7 +7914,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   view reads live here (`PARTIAL_COST_NOTE` "priced subtotal only",
   `API_PRICE_NOTE`, `EQUIVALENT_PARTIAL_TITLE`, `EQUIVALENT_UNPRICED_TITLE`,
   `PARTIAL_UNPRICED_TITLE`), so a partial dollar figure never reads as the
-  total. `accountsGlanceSection`
+  total, as do the timing populations (`TTFT_POPULATION`,
+  `LATENCY_POPULATION`) and `costMark`, the visible `partial` word with its
+  reason in a title and `sr-only` text, wrapped (`cost-mark-wrap`) after a
+  hidden space so the accessible name keeps it apart from the figure.
+  `accountsGlanceSection`
   (source `accounts`) lists every subscription account under each pool it
   dispatches in (a pool-less account as a pool of one) with its login dot
   (`loginKind`), each window's meter (accent, amber past
@@ -7926,7 +7936,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   is labeled directly above the KPI grid, and a scope strip renders outside the
   section boundary ONLY when the scoped query is unrenderable (so the scope
   stays reversible with no cards on screen). Eight KPI tiles come from
-  `totals`, each carrying a sparkline over `series.buckets[].metrics`; an empty
+  `totals`, each carrying a sparkline over `series.buckets[].metrics` (time
+  to first token reads the p50, as Traffic's column does); an empty
   ledger (`ledgerIsEmpty`: an unscoped answer whose `earliest_ms` is null,
   whatever the window) names the client base URL from the config panel. The provider row
   builder is `providerRowSection`, named for the row rather than its subject
@@ -7939,14 +7950,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`traffic-groups`) with a row per group with requests in the range:
   requests, error rate, TTFT and latency p50, cost, "At API prices" and cache
   hit (`cacheHitText`), a partial cost or API-price figure carrying its
-  subtotal mark. An opened row shows the p90/p99 tails, errors by class,
+  subtotal mark. An opened row (its pairs marked `traffic-pairs`, each value
+  beside its label) shows the p90/p99 tails, errors by class,
   the cache-write statement with its unknown-lifetime share, a remainder line
   saying unknown-lifetime write tokens have no price (that dimension,
   `UNKNOWN_LIFETIME_DIMENSION`, pinned to the server's label, is then left out
   of the missing-price list), each missing price with the server's
   `config_key`, and an alias group's chain steps
-  ("via alias" for a nested one) with the off-chain and not-dispatched
-  remainders. A section waiting on a new selection keeps the height it last
+  ("via alias" for a nested one; `globStepHint` says what a trailing-`*`
+  alias key matches; each step a label beside a wrapping value) with the
+  off-chain and not-dispatched remainders. A section waiting on a new selection keeps the height it last
   drew at
 - `src/handlers/status/dash_62_view_accounts.js` -- dashboard SCRIPT part 11
   of 16: the Accounts view sections, MULTI-SOURCE (`accounts`, plus `health`
@@ -7962,17 +7975,24 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   1 beside its word, "resets in", the reading's age and source and a stale
   or kept mark (stale dimmed), each seat's placement rank and reason, the
   range's traffic line, and the usage-poll line (every applicability token
-  neutral). API-key and cloud rows say "this provider reports no usage
+  neutral; "last poll answered ... (no new reading)" when the reading the row
+  shows is older than the attempt, `acctPollBroughtNoReading`), with any
+  result but a plain accepted read also on a copyable raw-token line
+  (`attentionRaw`). API-key and cloud rows say "this provider reports no usage
   windows". `accountsDriverSection` shows the refresh and poll drivers,
   stopped reading amber
 - `src/handlers/status/dash_63_view_models.js` -- dashboard SCRIPT part 12 of
   16: the Models view (`buildModels`), one section on `models` that also
   reads `attention` (cause words, recovered ages) and `query_models` (the
   seven-day per-model read, never scoped), each guarded so its loss costs
-  only its own facts. One expandable `models-lanes` table in server order
-  with one cause line (`models-cause-<key>`) over the lanes an item names;
+  only its own facts. One `Model lanes` card holding an expandable
+  `models-lanes` table in server order, State the first column, each row
+  toggle named by its nicknames and provider (`modelsRowName`), with one
+  cause line (`models-cause-<key>`) over the lanes an item names;
   lanes no nickname of which carried a request fold into the
   `models-unused` disclosure, and nothing folds while that read is not live.
+  Refusal and capability chips read in plain words (`modelsChipText`), the
+  raw tokens leading their tooltips.
   Transit reads "N of M responses changed" or "unmeasured"; each nickname
   links to Traffic scoped to the lane's entry and that model
 - `src/handlers/status/dash_72_tab_config.js` -- dashboard SCRIPT part 13 of
@@ -8047,13 +8067,15 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   and held, unapplied, until that set is known; also owns `selectedModel`
   and `selectedSort`; a user change
   pushes one history entry through `commitViewState`, cleanup replaces it).
-  The `ACTIONS` map (`open-view` among them) with one delegated click
+  The `ACTIONS` map (`open-view` among them, focusing the opened view's tab
+  when the strip drops the link that was followed) with one delegated click
   listener per pane root and on the verdict strip, and one keydown listener
   per pane root (`selectFocusedCode`: Ctrl+A on a focused copyable code
   selects its text alone), the favicons (`faviconState` follows the shown
   verdict: red for a stopped page or a current broken verdict, amber for a
   current degraded one, grey for a verdict not current or aged data), the
-  age ticker, the refresh control, the window picker and its dimming, tab
+  age ticker, the refresh control, the window picker and its dimming (no
+  range pressed on a windowless view, the selection kept), tab
   selection with keyboard navigation, the `animationend` listener that clears
   a changed mark, and the single load-time statement that starts the loops
 - `src/handlers/status/dashboard-manual-checklist.md` -- the by-hand checks the
@@ -8067,8 +8089,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
 - `src/handlers/status/page_browser_tests.rs` -- `cfg(test)` headless-Chrome
   harness `include!`d into `page::tests::browser`: `run_scenario` serves the
   assembled `PAGE` from a loopback test server with the test-only
-  `page_browser_driver.js` injected (never part of the released page) and
-  answers `/status` and `QUERY /status/query` from the
+  `page_browser_driver.js` injected (never part of the released page; its
+  `accessibleName` reads Chrome's own computed name, which the harness
+  enables with `--enable-features=ComputedAccessibilityInfo`) and answers `/status` and `QUERY /status/query` from the
   populated panel fixtures, `run_case_scenario` from one `ui_case_fixtures`
   review case, and `serve_review_case` serves a case for a reviewer to browse.
   Each topic is a `page_browser_<topic>_tests.rs` + `page_browser_<topic>_driver.js`
