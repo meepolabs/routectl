@@ -601,3 +601,126 @@ fn page_browser_models_the_lanes_query_ignores_the_scope() {
         "#models?scope=anthropic&model=sonnet"
     );
 }
+
+/// State is the first data column, after the row toggle; the rest keep
+/// their order. Read from the main table's header row.
+///
+/// Mutation check: move `C('State')` back after `C('Account')` in
+/// MODELS_COLUMNS -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_models_state_is_the_first_column() {
+    let result = populated("models-rows", &[MODELS_DRIVER]);
+
+    assert_eq!(
+        result["headers"],
+        serde_json::json!([
+            "Details",
+            "State",
+            "Model",
+            "Provider",
+            "Upstream",
+            "Account",
+            "Refuses",
+            "Changed in transit"
+        ]),
+        "{result:#}"
+    );
+}
+
+/// The lanes sit in one card titled like the section, and the line the
+/// unused lanes collapse to sits in that card under the table.
+///
+/// Mutation check: return the bare fragment instead of `card(...)` from
+/// modelsCard -> red (no card around the table).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_models_the_lanes_sit_in_a_card() {
+    let result = hop_case(&[MODELS_DRIVER]);
+
+    assert_eq!(
+        result["card"],
+        serde_json::json!({ "title": "Model lanes", "holds_unused": true }),
+        "{result:#}"
+    );
+}
+
+/// A chip reads plain words for the capability and verdict tokens the panel
+/// sends, and a token outside the word map reads as itself with its
+/// underscores spaced. The raw tokens stay at the head of the tooltip, and
+/// a refusal keeps its own mark.
+///
+/// Mutation checks: render `cell.capability + ' ' + cell.verdict` again in
+/// modelsCapabilities -> red (`forced_tool_choice unknown`); drop the
+/// underscore replacement from modelsWords -> red (the unknown token keeps
+/// its underscores).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_models_chips_read_plain_words() {
+    let result = populated(
+        "models-rows",
+        &[
+            "window.routectlModels = { extraCapability: \
+             { capability: 'next_gen_tool', verdict: 'half_known' } };",
+            MODELS_DRIVER,
+        ],
+    );
+
+    let chips = result["chips"].as_array().expect("chips");
+    let chip = |text: &str| {
+        chips
+            .iter()
+            .find(|c| c["text"] == text)
+            .unwrap_or_else(|| panic!("a `{text}` chip: {chips:#?}"))
+    };
+    let known = chip("forced tool choice: unknown");
+    assert!(
+        known["title"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("forced_tool_choice - unknown, ")),
+        "{known:#}"
+    );
+    let unknown = chip("next gen tool: half known");
+    assert!(
+        unknown["title"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("next_gen_tool - half_known, ")),
+        "{unknown:#}"
+    );
+    let refusal = chips
+        .iter()
+        .find(|c| {
+            c["refusal"] == true
+                && c["title"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("web_search - broken"))
+        })
+        .unwrap_or_else(|| panic!("the web_search refusal chip: {chips:#?}"));
+    assert_eq!(refusal["text"], "web search: refused", "{refusal:#}");
+    for c in chips {
+        let text = c["text"].as_str().expect("chip text");
+        assert!(!text.contains('_'), "a raw token on a chip: {text}");
+    }
+}
+
+/// A nickname link reads at regular weight with no underline at rest,
+/// though its row-header cell is bold; keyboard focus underlines it and
+/// draws the 2px focus ring.
+///
+/// Mutation checks: drop `font-weight: 400;` from `.models-link` -> red
+/// (600, the cell's weight); drop `text-decoration: none;` -> red
+/// (underlined at rest); drop `.models-link:focus-visible` from the
+/// underline rule -> red (no underline on focus).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_models_nickname_links_are_light_at_rest() {
+    let result = populated("models-rows", &[MODELS_DRIVER]);
+
+    let link = &result["link"];
+    assert_eq!(link["cell_weight"], "600", "positive control: {link:#}");
+    assert_eq!(link["weight"], "400", "{link:#}");
+    assert_eq!(link["decoration"], "none", "{link:#}");
+    assert_eq!(link["focus_visible"], true, "{link:#}");
+    assert_eq!(link["focus_decoration"], "underline", "{link:#}");
+    assert_eq!(link["focus_outline"], "solid 2px", "{link:#}");
+}

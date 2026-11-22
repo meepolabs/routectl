@@ -16,21 +16,21 @@
     return viewSection('models', modelsSection, 'Model lanes');
   }
 
-  // The Model column links each nickname to Traffic narrowed to it on the
-  // lane's own provider entry.
-  var MODELS_COLUMNS = [R('Model'), C('Provider'), C('Upstream'), C('Account'), C('State'),
+  // State leads so a narrow window still shows it before the table
+  // scrolls. The Model column links each nickname to Traffic narrowed to it
+  // on the lane's own provider entry.
+  var MODELS_COLUMNS = [C('State'), R('Model'), C('Provider'), C('Upstream'), C('Account'),
     W('Refuses'), C('Changed in transit')];
 
   function modelsSection(rec) {
     var rows = rec.data.rows;
     if (!Array.isArray(rows)) { throw new Error('models payload carries no rows'); }
     rows.forEach(modelsCheckRow);
-    var wrap = markRefreshUnit(document.createElement('div'), 'models-lanes');
-    wrap.className = 'ovsection';
     var startText = fmtTs(rec.data.started_ms);
-    wrap.appendChild(sectionHead('Model lanes',
-      'current state - changed-in-transit counts responses since ' + startText));
     if (!rows.length) {
+      var wrap = markRefreshUnit(document.createElement('div'), 'models-lanes');
+      wrap.className = 'ovsection';
+      wrap.appendChild(sectionHead('Model lanes', modelsHint(startText)));
       wrap.appendChild(emptyCard('No model lane yet',
         'Each configured model appears here, one row per provider entry and upstream it ' +
         'dispatches to, with its state and what it has learned to refuse.', ['current state']));
@@ -42,15 +42,26 @@
       items: modelsAttentionItems(SOURCES.attention),
       used: modelsUsedNicknames(SOURCES[QUERY_MODELS_SOURCE])
     };
+    return modelsCard(rows, ctx);
+  }
+
+  // The lanes in one card, as Traffic shows its table: the lanes still in
+  // use in the table, the rest folded into one line under it.
+  function modelsCard(rows, ctx) {
     var kept = [];
     var unused = [];
     rows.forEach(function (row) {
       (modelsIsUnused(row, ctx) ? unused : kept).push(row);
     });
-    wrap.appendChild(modelsTable(mkTable('models-lanes', 'Model lanes', MODELS_COLUMNS,
+    var body = document.createDocumentFragment();
+    body.appendChild(modelsTable(mkTable('models-lanes', 'Model lanes', MODELS_COLUMNS,
       { expandable: true }), kept, ctx));
-    if (unused.length) { wrap.appendChild(modelsUnusedLine(unused, ctx)); }
-    return wrap;
+    if (unused.length) { body.appendChild(modelsUnusedLine(unused, ctx)); }
+    return markRefreshUnit(card('Model lanes', modelsHint(ctx.startText), body), 'models-lanes');
+  }
+
+  function modelsHint(startText) {
+    return 'current state - changed-in-transit counts responses since ' + startText;
   }
 
   // The fields every row must carry before any of it is drawn.
@@ -209,11 +220,11 @@
 
   function modelsRow(tbl, row, ctx) {
     xrow(tbl, row.lane, [
+      modelsStateCell(row, ctx),
       modelsNicknameLinks(row),
       row.provider,
       row.upstream,
       modelsAccountText(row),
-      modelsStateCell(row, ctx),
       modelsRefusals(row),
       modelsTransitCell(row)
     ], modelsDetail(row, ctx), null);
@@ -296,12 +307,49 @@
     return wrap;
   }
 
-  // The bare capability key, the one to copy into `force_supported`, with
-  // the verdict, routing action and learned value in its tooltip.
+  // Plain words for the capability and verdict tokens the models panel
+  // sends (routectl-core's well-known capability keys and verdicts, plus the
+  // router's panel-only display verdicts). A token outside the map reads as
+  // itself with its underscores spaced; the raw token stays first in the
+  // chip's tooltip.
+  var MODELS_CAPABILITY_WORDS = {
+    web_search: 'web search',
+    computer_use: 'computer use',
+    structured_output: 'structured output',
+    prompt_caching: 'prompt caching',
+    thinking: 'thinking',
+    reasoning_replay: 'reasoning replay',
+    forced_tool_choice: 'forced tool choice'
+  };
+  var MODELS_VERDICT_WORDS = {
+    verified: 'works',
+    broken: 'refused',
+    suspect: 'maybe ignored',
+    cleared: 'cleared',
+    unknown: 'unknown',
+    assumed: 'assumed',
+    forced_supported: 'supported by config',
+    forced_unsupported: 'unsupported by config',
+    unrepresentable: 'cannot be sent',
+    mixed: 'differs by nickname'
+  };
+
+  function modelsWords(words, token) {
+    var raw = String(token);
+    return Object.prototype.hasOwnProperty.call(words, raw) ? words[raw] : raw.replace(/_/g, ' ');
+  }
+
+  function modelsChipText(capability, verdict) {
+    return modelsWords(MODELS_CAPABILITY_WORDS, capability) + ': ' + modelsWords(MODELS_VERDICT_WORDS, verdict);
+  }
+
+  // The capability and verdict in plain words; the bare key, the one to
+  // copy into `force_supported`, leads the tooltip with the verdict,
+  // routing action and learned value.
   function modelsRefusalChip(refusal) {
     var chip = document.createElement('span');
     chip.className = 'hchip models-refusal';
-    chip.textContent = String(refusal.capability);
+    chip.textContent = modelsChipText(refusal.capability, refusal.verdict);
     chip.title = refusal.capability + ' - ' + refusal.verdict + ', ' + refusal.action +
       ', value ' + (refusal.value || '-');
     return chip;
@@ -352,8 +400,8 @@
     return wrap;
   }
 
-  // Every resolved capability cell: its key and display verdict, the tier
-  // and routing action in its tooltip. A cell resolved as unsupported is
+  // Every resolved capability cell: its capability and display verdict in
+  // plain words, the raw tokens, tier and routing action in its tooltip. A cell resolved as unsupported is
   // marked; a verdict reads as text, never as a color alone.
   function modelsCapabilities(cells) {
     var wrap = document.createElement('span');
@@ -361,7 +409,7 @@
     cells.forEach(function (cell) {
       var chip = document.createElement('span');
       chip.className = 'hchip' + (cell.supported === false ? ' models-refusal' : '');
-      chip.textContent = cell.capability + ' ' + cell.verdict;
+      chip.textContent = modelsChipText(cell.capability, cell.verdict);
       chip.title = cell.capability + ' - ' + cell.verdict + ', ' + cell.action +
         (cell.layer ? ', decided by ' + cell.layer : '') +
         (cell.source ? ', ' + cell.source + ' evidence' : '');

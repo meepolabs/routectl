@@ -806,17 +806,18 @@ fn a_dimmed_stale_meter_fill_keeps_three_to_one() {
     }
 }
 
-/// The Now "see Accounts" link and the shared "see <view>" link (Doctor's
-/// "see Models") keep 4.5:1 on the page and on a card in both themes, and
-/// the shared link draws the accent focus ring.
+/// The Now "see Accounts" link, the shared "see <view>" link (Doctor's
+/// "see Models") and the Models nickname link keep 4.5:1 on the page and on
+/// a card in both themes, and the shared link draws the accent focus ring.
 ///
 /// Mutation checks: color `.glance-link` with `var(--accent)` -> red (light
-/// on --bg is 4.43:1); drop the `.view-link` color -> red (no color).
+/// on --bg is 4.43:1); drop the `.view-link` color -> red (no color); color
+/// `.models-link` with `var(--accent)` -> red.
 #[test]
 fn the_see_view_links_keep_four_and_a_half_to_one() {
     let css = style();
     let decls = css_decls(&css);
-    for sel in [".glance-link", ".view-link"] {
+    for sel in [".glance-link", ".view-link", ".models-link"] {
         let (_, value) = block(&decls, "", sel)
             .into_iter()
             .rfind(|(prop, _)| *prop == "color")

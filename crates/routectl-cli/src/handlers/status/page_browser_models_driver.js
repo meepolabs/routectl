@@ -10,6 +10,8 @@
 //   spanLanes         `[ms, ...]`: add one problem lane per entry, named
 //                     `span-<i>`, whose problem began that long before as_of
 //                     and which no cause line covers
+//   extraCapability   `{capability, verdict}`: add that resolved capability
+//                     cell to every lane
 (function (d) {
   'use strict';
 
@@ -42,12 +44,27 @@
     });
   }
 
+  function addCapability(models) {
+    models.data.rows.forEach(function (row) {
+      row.capabilities.push({
+        capability: opts.extraCapability.capability,
+        verdict: opts.extraCapability.verdict,
+        supported: null,
+        source: null,
+        layer: null,
+        action: 'none'
+      });
+    });
+  }
+
   d.rewrite(function (url, text) {
-    if (url.pathname !== '/status' || !(opts.attentionDown || opts.recoveredLane || opts.spanLanes)) {
+    if (url.pathname !== '/status' ||
+        !(opts.attentionDown || opts.recoveredLane || opts.spanLanes || opts.extraCapability)) {
       return text;
     }
     var agg = JSON.parse(text);
     if (opts.spanLanes) { addSpanLanes(agg.panels.models); }
+    if (opts.extraCapability) { addCapability(agg.panels.models); }
     var attention = agg.panels.attention;
     if (opts.attentionDown) {
       agg.panels.attention = {
@@ -106,8 +123,8 @@
         names: Array.prototype.map.call(tr.querySelectorAll('.models-link'), function (a) {
           return { text: a.textContent, href: a.getAttribute('href') };
         }),
-        provider: cells[2].textContent,
-        state: cells[5].textContent,
+        provider: cells[3].textContent,
+        state: cells[1].textContent,
         refuses: cells[6].textContent,
         transit: cells[7].textContent,
         toggle_name: document.getElementById(tr.id + '-toggle').getAttribute('aria-label'),
@@ -119,10 +136,56 @@
     return out;
   }
 
+  // The main table's column headers, the row toggle's first.
+  function headers() {
+    return Array.prototype.map.call(document.querySelectorAll('#models-lanes thead th'), function (th) {
+      return th.textContent;
+    });
+  }
+
+  // The card the main table sits in: its title, and whether the collapsed
+  // lanes sit in it too.
+  function cardOf() {
+    var card = document.getElementById('models-lanes').closest('.card');
+    var unused = document.getElementById('models-unused');
+    return card ? {
+      title: textIn(card, '.card-title'),
+      holds_unused: !!unused && card.contains(unused)
+    } : null;
+  }
+
+  // Every refusal and capability chip, open or not, with its tooltip.
+  function chips(body) {
+    return Array.prototype.map.call(body.querySelectorAll('.hchip'), function (chip) {
+      return { text: chip.textContent, title: chip.title, refusal: chip.classList.contains('models-refusal') };
+    });
+  }
+
+  // A nickname link's computed weight and underline at rest, then with
+  // keyboard focus.
+  function linkLook() {
+    var link = document.querySelector('#models-lanes .models-link');
+    var rest = getComputedStyle(link);
+    var out = { weight: rest.fontWeight, decoration: rest.textDecorationLine, color: rest.color };
+    link.focus();
+    var focused = getComputedStyle(link);
+    out.focus_visible = link.matches(':focus-visible');
+    out.focus_decoration = focused.textDecorationLine;
+    out.focus_outline = focused.outlineStyle + ' ' + focused.outlineWidth;
+    link.blur();
+    var cell = link.closest('th');
+    out.cell_weight = cell ? getComputedStyle(cell).fontWeight : null;
+    return out;
+  }
+
   function seen() {
     var body = document.getElementById('body-models');
     var unused = document.getElementById('models-unused');
     return {
+      headers: headers(),
+      card: cardOf(),
+      chips: chips(body),
+      link: linkLook(),
       rows: rows(),
       unused: unused ? textIn(unused, 'summary') : null,
       error_cards: body.querySelectorAll('.unavailable-msg, .incompatible-msg').length,
@@ -188,7 +251,7 @@
     var node = null;
     return d.waitUntil('the lane table', lanesDrawn).then(function () {
       node = Array.prototype.filter.call(document.querySelectorAll('#models-lanes tr.exp-row'), function (tr) {
-        return tr.children[3].textContent === 'claude-sonnet-4-5' && tr.children[2].textContent === 'anthropic';
+        return tr.children[4].textContent === 'claude-sonnet-4-5' && tr.children[3].textContent === 'anthropic';
       })[0];
       if (!node) { throw new Error('no sonnet lane row'); }
       document.getElementById(node.id + '-toggle').click();

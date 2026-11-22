@@ -229,9 +229,12 @@ banner, no retry signal -- silently mislabeled data.
   lane.
 - Seed a learned output ceiling (`ceiling:<n>`) on a lane. Hover its chip:
   the tooltip ends in `value ceiling:<n>`; a chip for a capability whose
-  verdict writes no value ends in `value -`. The chip text stays the bare
-  capability key, the one to copy into `force_supported`. Expanding the row
-  lists every resolved capability with its verdict, the refused ones marked.
+  verdict writes no value ends in `value -`. The chip reads the capability
+  and verdict in plain words (`web search: refused`); its tooltip starts with
+  the bare capability key, the one to copy into `force_supported`. Expanding
+  the row lists every resolved capability with its verdict the same way
+  (`forced tool choice: unknown`), the refused ones marked. No chip shows an
+  underscore.
 - A `verified` row on the same lane must not render as a refusal chip. Seed
   it with a recognized `evidence_class` (for example `schema_parse`): replay
   skips a `verified` row whose class is missing or unrecognized, so a row
@@ -263,7 +266,12 @@ banner, no retry signal -- silently mislabeled data.
 - With a screen reader's button list open on Models or Traffic, each row's
   expand button is named `Details for <row>` (the lane, or the group), never
   one shared name.
-- Each nickname in the Model column is a link. With the range on Today,
+- The Models table sits in a card titled `Model lanes`, with the collapsed
+  lanes line inside it, and State is its first column after the row toggle:
+  at 720 px the State cell shows without scrolling the table.
+- Each nickname in the Model column is a link: regular weight and not
+  underlined at rest, underlined on hover and keyboard focus, with the focus
+  ring on focus. With the range on Today,
   following it opens Traffic with the address
   `#traffic?range=last7d&scope=<provider entry>&model=<nickname>`; with any
   other range picked first (Week, say) the link keeps that range. The strip
