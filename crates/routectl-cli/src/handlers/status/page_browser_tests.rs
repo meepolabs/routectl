@@ -266,6 +266,9 @@ fn dump_dom(url: &str, budget_ms: u64, extra: &[&str], scratch: &Path) -> String
             "--disable-extensions",
             "--disable-sync",
             "--mute-audio",
+            // Exposes `Element.computedName`, the accessible name Chrome's
+            // own accessibility tree computes, to the driver.
+            "--enable-features=ComputedAccessibilityInfo",
         ])
         .args(extra)
         .arg(format!(

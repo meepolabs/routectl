@@ -327,6 +327,7 @@
       alt_approx: d.approxType(line.querySelector('.acct-traffic-alt > span')),
       alt_mark: d.shownText(line.querySelector('.acct-traffic-alt .cost-mark')),
       alt_mark_spoken: d.spokenMark(line.querySelector('.acct-traffic-alt .cost-mark')),
+      alt_name: d.accessibleName(line.querySelector('.acct-traffic-alt')),
       alt_faint: !!line.querySelector('.acct-traffic-alt .mag-zero'),
       note: textIn(line, '.acct-traffic-note')
     };

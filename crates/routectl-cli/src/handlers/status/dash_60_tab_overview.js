@@ -839,15 +839,21 @@
   // title for a pointer and as visually hidden text for everyone else: the
   // mark takes no focus, so a title alone never reaches a keyboard or a
   // screen reader. The visible gap is a margin, which text does not carry, so
-  // a hidden space keeps the word apart from the figure when read as text.
+  // a hidden space goes before the word. That space sits outside the titled
+  // span: Chrome drops a leading space inside an element that carries a
+  // title when it builds an accessible name, running the word into the
+  // figure.
   function costMark(title) {
     var mark = document.createElement('span');
     mark.className = 'cost-mark';
-    mark.appendChild(srOnlyText(' '));
     mark.appendChild(document.createTextNode(labelFor('cost', 'partial').label));
     mark.appendChild(srOnlyText(' (' + title + ')'));
     mark.title = title;
-    return mark;
+    var wrap = document.createElement('span');
+    wrap.className = 'cost-mark-wrap';
+    wrap.appendChild(srOnlyText(' '));
+    wrap.appendChild(mark);
+    return wrap;
   }
 
   function srOnlyText(text) {

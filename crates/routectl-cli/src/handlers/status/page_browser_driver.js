@@ -188,6 +188,29 @@
     };
   }
 
+  // The accessible name Chrome computes from `node`'s content, the text a
+  // screen reader is handed for it: read as the name of a probe labelled by
+  // the node, so a plain container (which has no name of its own) gets one.
+  // Needs Chrome's ComputedAccessibilityInfo feature, which the harness turns
+  // on; without it this throws rather than report a name nobody computed.
+  // Null for no node.
+  function accessibleName(node) {
+    if (!node) { return null; }
+    var probe = document.createElement('span');
+    if (!('computedName' in probe)) {
+      throw new Error('Chrome exposes no computedName: ComputedAccessibilityInfo is off');
+    }
+    var hadId = node.hasAttribute('id');
+    if (!hadId) { node.id = 'driver-named-' + Math.random().toString(36).slice(2); }
+    probe.setAttribute('role', 'img');
+    probe.setAttribute('aria-labelledby', node.id);
+    document.body.appendChild(probe);
+    var name = probe.computedName;
+    probe.remove();
+    if (!hadId) { node.removeAttribute('id'); }
+    return name;
+  }
+
   // The type of a figure's leading `~` beside the type of its numeral (the
   // figure's own text). Null for no figure or no `~`.
   function approxType(fig) {
@@ -213,6 +236,7 @@
     pressSelectAll: pressSelectAll,
     shownText: shownText,
     spokenMark: spokenMark,
+    accessibleName: accessibleName,
     approxType: approxType
   };
   window.routectlDriver = api;

@@ -384,7 +384,10 @@
       var name = s.kind === ALIAS_STEP_KIND ? 'via alias ' + s.step : s.step;
       var line = chainLine('Step ' + (i + 1), name, s.requests, total);
       var hint = globStepHint(s);
-      if (hint) { line.insertBefore(hint, line.querySelector('.traffic-stepname').nextSibling); }
+      if (hint) {
+        var name = line.querySelector('.traffic-stepname');
+        name.parentNode.insertBefore(hint, name.nextSibling);
+      }
       block.appendChild(line);
     });
     block.appendChild(chainLine('off chain', null, g.off_chain, total));
@@ -404,6 +407,8 @@
     return hint;
   }
 
+  // A labelled line holds its label and, beside it, one value that wraps
+  // within itself, as a label:value pair does.
   function chainLine(label, name, count, total) {
     var line = document.createElement('p');
     line.className = 'traffic-line traffic-step';
@@ -413,13 +418,16 @@
       term.textContent = label;
       line.appendChild(term);
     }
+    var value = document.createElement('span');
+    value.className = 'traffic-stepvalue';
     if (name !== null) {
       var nameEl = document.createElement('span');
       nameEl.className = 'traffic-stepname';
       nameEl.textContent = name;
-      line.appendChild(nameEl);
+      value.appendChild(nameEl);
     }
-    if (count !== null) { line.appendChild(countShare(count, total)); }
+    if (count !== null) { value.appendChild(countShare(count, total)); }
+    line.appendChild(value);
     return line;
   }
 

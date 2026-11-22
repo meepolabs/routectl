@@ -657,7 +657,7 @@
     }
     var known = current || lastVerdict;
     if (!known) {
-      var why = attentionUnreachable() ? UNREACHABLE_NOTE : null;
+      var why = lastRefreshFailed() ? UNREACHABLE_NOTE : null;
       return { kind: 'idle', text: 'Checking routing state', target: null, note: why };
     }
     return {
@@ -670,9 +670,10 @@
 
   var UNREACHABLE_NOTE = 'the daemon cannot be reached';
 
-  // A failed refresh leaves the attention source stale or dead: the daemon
-  // did not answer.
-  function attentionUnreachable() {
+  // Whether the attention source's last refresh failed, leaving it stale or
+  // dead. Every failure counts (no answer, an overload, a timeout), and the
+  // note drawn from it does not tell those causes apart.
+  function lastRefreshFailed() {
     var state = SOURCES.attention.state;
     return state === 'stale' || state === 'dead';
   }
@@ -680,7 +681,7 @@
   // Any state other than a failed refresh means the daemon answered without
   // a current verdict.
   function staleVerdictNote(asOf) {
-    var why = attentionUnreachable() ? UNREACHABLE_NOTE : 'verdict not current';
+    var why = lastRefreshFailed() ? UNREACHABLE_NOTE : 'verdict not current';
     return 'as of ' + verdictTime(asOf) + ' - ' + why;
   }
 

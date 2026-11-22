@@ -57,14 +57,23 @@
   font-family: var(--font-mono);
   overflow-wrap: anywhere;
 }
+/* A chain line lays out like a label:value pair: the value (name, hint and
+   count) wraps inside its own column, never under the label. */
 .traffic-step {
+  display: grid;
+  grid-template-columns: minmax(7rem, max-content) minmax(0, 1fr);
+  align-items: baseline;
+  column-gap: var(--sp-3);
+}
+.traffic-stepvalue {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   column-gap: var(--sp-3);
+  min-width: 0;
 }
+.traffic-step > .traffic-stepvalue:only-child { grid-column: 1 / -1; }
 .traffic-steplabel {
-  min-width: 7rem;
   color: var(--faint);
   font-family: var(--font-ui);
   font-size: var(--fs-xs);

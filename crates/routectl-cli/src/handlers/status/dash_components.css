@@ -293,11 +293,11 @@ td.num .unit, th.num .unit {
 .mag-zero { color: var(--faint); }
 /* A figure that is a subtotal (a cost over the priced rows, an API-price
    equivalent over the fully priced subscription rows) says so beside it, in
-   words, not only in a hover title. It contains its visually hidden reason,
-   so that text stays inside a table that scrolls in its card instead of
-   widening the page. */
+   words, not only in a hover title. Its wrapper contains the visually hidden
+   space before it and its reason, so that text stays inside a table that
+   scrolls in its card instead of widening the page. */
+.cost-mark-wrap { position: relative; }
 .cost-mark {
-  position: relative;
   margin-left: var(--sp-1);
   font-family: var(--font-ui);
   font-size: var(--fs-xs);

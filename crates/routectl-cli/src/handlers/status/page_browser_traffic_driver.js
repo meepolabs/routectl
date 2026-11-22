@@ -88,8 +88,15 @@
     });
   }
 
+  // The box of the first node under `root` matching `selector`, or null.
+  function boxIn(root, selector) {
+    var node = root.querySelector(selector);
+    return node ? box(node) : null;
+  }
+
   // One line of a detail block: its label, name, count and share as drawn,
-  // its whole text, the keys it shows, and its top offset.
+  // its whole text, the keys it shows, its top offset, and the boxes of its
+  // label and of each part of its value.
   function blockLine(line) {
     var count = line.querySelector('.traffic-count');
     var figures = count ? count.children : [];
@@ -101,7 +108,13 @@
       share: figures.length > 1 ? figures[1].textContent : null,
       text: line.textContent,
       keys: keysIn(line),
-      top: line.getBoundingClientRect().top
+      top: line.getBoundingClientRect().top,
+      label_box: boxIn(line, '.traffic-steplabel'),
+      part_boxes: {
+        name: boxIn(line, '.traffic-stepname'),
+        hint: boxIn(line, '.traffic-stephint'),
+        count: boxIn(line, '.traffic-count')
+      }
     };
   }
 
@@ -284,9 +297,10 @@
       cost_approx: d.approxType(cost.firstElementChild),
       cost_mark: d.shownText(cost.querySelector('.cost-mark')),
       cost_mark_spoken: d.spokenMark(cost.querySelector('.cost-mark')),
+      cost_name: d.accessibleName(cost),
       equivalent: d.shownText(cells[5]),
       equivalent_approx: d.approxType(cells[5].firstElementChild),
-      equivalent_spoken: cells[5].textContent,
+      equivalent_name: d.accessibleName(cells[5]),
       equivalent_mark: d.shownText(cells[5].querySelector('.cost-mark')),
       equivalent_mark_spoken: d.spokenMark(cells[5].querySelector('.cost-mark')),
       equivalent_mark_title: titleIn(cells[5], '.cost-mark'),

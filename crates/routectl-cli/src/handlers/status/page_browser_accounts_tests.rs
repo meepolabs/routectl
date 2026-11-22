@@ -630,6 +630,8 @@ fn page_browser_accounts_traffic_cost_names_an_equivalent_as_one() {
 /// traffic none of which could be priced, never a bare status word.
 ///
 /// Mutation checks: the mark appended in acctCostNodes removed -> red (seat);
+/// costMark's hidden space moved back inside the titled mark -> red (the
+/// seat's accessible name reads `~$1.23partial`);
 /// the `unpriced` figure dropped from acctCostNodes -> red (api_key reads
 /// `subscription`).
 #[test]
@@ -639,10 +641,16 @@ fn page_browser_accounts_an_equivalent_that_leaves_rows_out_says_so() {
 
     assert_eq!(out["seat"]["alt"], "~$1.23partialAt API prices", "{out:#}");
     assert_eq!(out["seat"]["alt_mark"], "partial", "{out:#}");
+    assert!(
+        text(&out["seat"]["alt_name"], "the seat's accessible name").starts_with(
+            "~$1.23 partial (priced subtotal only: leaves out usage that has no price)"
+        ),
+        "the accessible name keeps the word apart from the figure: {out:#}"
+    );
     assert_eq!(
         out["seat"]["alt_mark_spoken"],
         json!({
-            "text": " partial (priced subtotal only: leaves out usage that has no price)",
+            "text": "partial (priced subtotal only: leaves out usage that has no price)",
             "hidden_part_hidden": true
         }),
         "the mark's reason reaches a keyboard and a screen reader: {out:#}"

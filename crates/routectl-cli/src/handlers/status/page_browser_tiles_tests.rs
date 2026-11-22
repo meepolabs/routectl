@@ -245,7 +245,8 @@ fn page_browser_tiles_the_api_price_tilde_reads_as_large_as_its_number() {
 /// 0); equivalentCoverage ignoring `equivalent_status` -> red (round 0
 /// unmarked); equivalentCoverage reading a listed missing price as partial
 /// -> red (round 3 marked); apiPriceBlock returning null with no equivalent
-/// -> red (round 2).
+/// -> red (round 2); costMark's hidden space moved back inside the titled
+/// mark -> red (the accessible name reads `~$617.54partial`).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_tiles_an_equivalent_that_leaves_rows_out_says_so() {
@@ -265,9 +266,14 @@ fn page_browser_tiles_an_equivalent_that_leaves_rows_out_says_so() {
         "{partial:#}"
     );
     assert_eq!(
+        text(partial, "alt_value_name"),
+        Some("~$617.54 partial (priced subtotal only: leaves out usage that has no price)"),
+        "the accessible name keeps the word apart from the figure: {partial:#}"
+    );
+    assert_eq!(
         partial["alt_mark_spoken"],
         json!({
-            "text": " partial (priced subtotal only: leaves out usage that has no price)",
+            "text": "partial (priced subtotal only: leaves out usage that has no price)",
             "hidden_part_hidden": true
         }),
         "the mark's reason reaches a keyboard and a screen reader: {partial:#}"

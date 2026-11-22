@@ -86,9 +86,13 @@ fn page_browser_a_failure_on_the_first_round_shows_the_error_card() {
 /// An overloaded daemon puts up its warn banner; once the daemon cannot be
 /// reached at all the banner goes and the strip alone says so. Positive
 /// control: the overload banner showed, so a banner was there to remove.
+/// The strip's note is not cause-specific yet: any failed refresh, an
+/// overload included, reads "the daemon cannot be reached", so during the
+/// overload the note says so beside the banner.
 ///
-/// Mutation check: put back `setBanner('error', 'daemon unreachable, backing
-/// off')` for the unreachable case in markTransport -> red.
+/// Mutation checks: put back `setBanner('error', 'daemon unreachable, backing
+/// off')` for the unreachable case in markTransport -> red; lastRefreshFailed
+/// counting only a dead source -> red (the overload's note is gone).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_an_unreachable_daemon_shows_no_banner_and_an_overload_does() {
@@ -102,6 +106,10 @@ fn page_browser_an_unreachable_daemon_shows_no_banner_and_an_overload_does() {
     assert!(
         text(&overloaded["banner"]["class_name"], "the banner class").contains("banner--warn"),
         "{result:#}"
+    );
+    assert_eq!(
+        overloaded["unreachable"], true,
+        "the note does not tell an overload from no answer: {result:#}"
     );
     assert_eq!(unreachable["banner"], Value::Null, "{result:#}");
     assert_eq!(unreachable["unreachable"], true, "{result:#}");

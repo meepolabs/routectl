@@ -227,6 +227,7 @@
       alt_note: textOr(tile, '.kpi-alt-note'),
       alt_mark: d.shownText(tile.querySelector('.kpi-alt-value .cost-mark')),
       alt_mark_spoken: d.spokenMark(tile.querySelector('.kpi-alt-value .cost-mark')),
+      alt_value_name: d.accessibleName(tile.querySelector('.kpi-alt-value')),
       alt_mark_title: titleOr(tile, '.kpi-alt-value .cost-mark'),
       alt_faint: !!tile.querySelector('.kpi-alt-value.mag-zero'),
       requests: lastTotals.requests,

@@ -561,15 +561,15 @@ fn page_browser_traffic_every_detail_value_sits_beside_its_label() {
             .as_array()
             .unwrap_or_else(|| panic!("pairs in {out:#}"));
         assert_eq!(pairs.len(), 4, "{width}: {out:#}");
+        let f = |b: &Value, k: &str| b[k].as_f64().expect("a box edge");
         let cache = &pairs[3];
         assert!(
-            cache["value_box"]["bottom"].as_f64() > cache["term_box"]["bottom"].as_f64(),
+            f(&cache["value_box"], "bottom") > f(&cache["term_box"], "bottom"),
             "positive control: the cache-write statement runs past its label's line: {width}: \
              {cache:#}"
         );
         for pair in pairs {
             let (term, value) = (&pair["term_box"], &pair["value_box"]);
-            let f = |b: &Value, k: &str| b[k].as_f64().expect("a box edge");
             assert!(
                 f(value, "left") >= f(term, "right"),
                 "{width}: `{}` value starts left of its label's end: {pair:#}",
@@ -579,6 +579,94 @@ fn page_browser_traffic_every_detail_value_sits_beside_its_label() {
                 (f(value, "top") - f(term, "top")).abs() < 4.0,
                 "{width}: `{}` value does not start on its label's line: {pair:#}",
                 pair["term"]
+            );
+        }
+    }
+}
+
+/// A chain line reads like a label:value pair: at 720 and at 1440, a glob
+/// step whose hint is long enough to wrap keeps its name, its hint and its
+/// count beside its label, wrapping inside the value column, never under
+/// the label. Positive control: at 720 the glob step's value really spans
+/// more than one line.
+///
+/// Mutation check: give `.traffic-step` `display: flex; flex-wrap: wrap`
+/// again with the parts as its own children (chainLine appending them to
+/// the line, not to `.traffic-stepvalue`) -> red at 720 (the hint or the
+/// count starts under `Step 1`).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_traffic_every_chain_step_value_sits_beside_its_label() {
+    let mut config = glob_alias_config();
+    let chain = |steps: &[&str]| {
+        routectl_router::AliasValue::Chain(steps.iter().map(|s| (*s).to_owned()).collect())
+    };
+    config
+        .aliases
+        .insert("claude-sonnet-long-family*".into(), chain(&["sonnet"]));
+    config.aliases.insert(
+        "wide".into(),
+        chain(&["claude-sonnet-long-family*", "mid", "codex-mini"]),
+    );
+    let seeds: Vec<crate::handlers::status::query::fixture::Seed<'_>> = [
+        ("wide-1", "sonnet", "anthropic"),
+        ("wide-2", "glm", "compat"),
+        ("wide-3", "codex-mini", "codex"),
+    ]
+    .into_iter()
+    .map(|(id, model, provider)| (id, 1, "wide", Some(model), Some(provider), None, "ok", None))
+    .collect();
+    let answer = served_answer(
+        config,
+        &seeds,
+        &json!({"window": "today", "group_by": "alias"}),
+    );
+
+    for width in ["--window-size=1440,987", "--window-size=720,987"] {
+        let out = browser::run_scenario_with(
+            &traffic_scenario(
+                "traffic-detail",
+                "traffic?group=alias",
+                &[
+                    ("routectlTrafficAnswers", json!({ "alias": answer.clone() })),
+                    ("routectlTrafficRow", json!("wide")),
+                    ("routectlTrafficRowKey", json!("kwide")),
+                ],
+            ),
+            &[width],
+        )
+        .result;
+
+        let lines = block_lines(&out, "chain");
+        let f = |b: &Value, k: &str| b[k].as_f64().expect("a box edge");
+        let glob = &lines[0];
+        assert_eq!(
+            glob["hint"], "(matches any model name starting with claude-sonnet-long-family)",
+            "{width}: {out:#}"
+        );
+        if width.contains("720") {
+            let parts = &glob["part_boxes"];
+            assert!(
+                f(&parts["count"], "top") > f(&parts["name"], "top") + 4.0,
+                "positive control: the glob step's value wraps at 720: {glob:#}"
+            );
+        }
+        for line in lines {
+            let label = &line["label_box"];
+            let parts = line["part_boxes"].as_object().expect("part boxes");
+            let mut first_top = f64::INFINITY;
+            for (part, part_box) in parts.iter().filter(|(_, b)| !b.is_null()) {
+                assert!(
+                    f(part_box, "left") >= f(label, "right"),
+                    "{width}: `{}` {part} starts left of its label's end: {line:#}",
+                    line["label"]
+                );
+                first_top = first_top.min(f(part_box, "top"));
+            }
+            assert!(
+                (first_top - f(label, "top")).abs() < 4.0,
+                "{width}: `{}` value does not start on its label's line: {line:#}",
+                line["label"]
             );
         }
     }
@@ -853,7 +941,8 @@ fn row<'a>(out: &'a Value, label: &str) -> &'a Value {
 /// Mutation checks: costFigure handing `m.cost_usd` to money() whenever the
 /// status is priced or partial -> red (`$-`); that and money(null)
 /// returning '0.00' -> red (`$0.00`); the mark appended by
-/// trafficCostFigure removed -> red.
+/// trafficCostFigure removed -> red; costMark's hidden space moved back
+/// inside the titled mark -> red (`$0.250partial` in the accessible name).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_traffic_an_unknown_cost_never_reads_as_zero() {
@@ -885,8 +974,12 @@ fn page_browser_traffic_an_unknown_cost_never_reads_as_zero() {
     assert_eq!(subtotal["cost"], "$0.250partial", "{subtotal:#}");
     assert_eq!(subtotal["cost_mark"], "partial", "{subtotal:#}");
     assert_eq!(
+        subtotal["cost_name"], "$0.250 partial (priced subtotal only)",
+        "the accessible name keeps the word apart from the figure: {subtotal:#}"
+    );
+    assert_eq!(
         subtotal["cost_mark_spoken"],
-        json!({"text": " partial (priced subtotal only)", "hidden_part_hidden": true}),
+        json!({"text": "partial (priced subtotal only)", "hidden_part_hidden": true}),
         "the mark's reason reaches a keyboard and a screen reader: {subtotal:#}"
     );
     let priced = row(&out, "model-03");
@@ -919,7 +1012,9 @@ const UNKNOWN_LIFETIME: &str = "cache write (unknown lifetime)";
 /// equivalent as full) -> red (model-01 unmarked); equivalentCoverage reading
 /// a listed missing price as partial -> red (model-07 marked); the
 /// `unpriced` branch dropped -> red (model-03 reads `-`); the partial clause
-/// of holdsSubscription dropped -> red (model-05 reads `-`).
+/// of holdsSubscription dropped -> red (model-05 reads `-`); costMark's
+/// hidden space moved back inside the titled mark -> red (the accessible
+/// name reads `~$268.29partial`).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_traffic_an_equivalent_that_leaves_rows_out_says_so() {
@@ -971,17 +1066,17 @@ fn page_browser_traffic_an_equivalent_that_leaves_rows_out_says_so() {
         "{partial:#}"
     );
     assert_eq!(
+        partial["equivalent_name"],
+        format!("~$268.29 partial ({EQUIVALENT_PARTIAL_TITLE})"),
+        "the accessible name keeps the word apart from the figure: {partial:#}"
+    );
+    assert_eq!(
         partial["equivalent_mark_spoken"],
         json!({
-            "text": format!(" partial ({EQUIVALENT_PARTIAL_TITLE})"),
+            "text": format!("partial ({EQUIVALENT_PARTIAL_TITLE})"),
             "hidden_part_hidden": true
         }),
         "the mark's reason reaches a keyboard and a screen reader: {partial:#}"
-    );
-    assert_eq!(
-        partial["equivalent_spoken"],
-        format!("~$268.29 partial ({EQUIVALENT_PARTIAL_TITLE})"),
-        "read as text, the word stands apart from the figure: {partial:#}"
     );
     let full = row(&out, "model-02");
     assert_eq!(full["equivalent"], "~$40.25", "positive control: {full:#}");
