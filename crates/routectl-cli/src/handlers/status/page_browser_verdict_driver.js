@@ -297,6 +297,29 @@
       out.hash = location.hash;
       out.pane_hidden = document.getElementById('pane-' + row.verdict.target).hidden;
       out.after = strip();
+      out.focused = document.activeElement ? document.activeElement.id : null;
+      return out;
+    });
+  });
+
+  // The strip's link on each view the operator moves through, read in the
+  // same task as the tab click, before any poll could repaint the strip.
+  d.scenario('verdict-link-follows-view', function () {
+    var row = window.routectlVerdictRow;
+    rules.push(onAggregate(withVerdict(row.verdict)));
+    var out = { views: [] };
+    return d.waitUntil('the served verdict', function () {
+      return strip().text === row.verdict.text;
+    }, 30000).then(function () {
+      out.start = strip();
+      out.rounds_before = answers('/status');
+      row.path.forEach(function (view) {
+        document.getElementById('tab-' + view).click();
+        var seen = strip();
+        seen.view = view;
+        out.views.push(seen);
+      });
+      out.rounds_after = answers('/status');
       return out;
     });
   });

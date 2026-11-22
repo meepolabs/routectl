@@ -516,11 +516,14 @@
     'group-by': function (arg) { if (arg) { onGroupBy(arg); } },
     'sort-column': function (arg) { if (arg) { onSortColumn(arg); } },
     // A same-page link: the view switch goes through the one view-state path
-    // so the rest of the selection is kept, not reset by the bare hash.
+    // so the rest of the selection is kept, not reset by the bare hash. The
+    // strip drops its link to the view now open, so focus that went with it
+    // lands on that view's tab rather than the document body.
     'open-view': function (arg, node, e) {
       if (!viewFor(arg) || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) { return; }
       e.preventDefault();
       selectTab(arg);
+      if (!node.isConnected) { el('tab-' + arg).focus(); }
     },
     // A link to Traffic scoped to a model: the browser follows the address
     // as it is, and once it has been applied focus lands on the scope strip

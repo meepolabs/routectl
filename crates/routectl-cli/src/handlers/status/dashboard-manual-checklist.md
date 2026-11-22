@@ -309,11 +309,13 @@ banner, no retry signal -- silently mislabeled data.
   source. The meter is the accent color, amber with `nearly used` past 90%
   and red with `at limit` at 100%. Stop the usage poll (block its vendor
   endpoint) and wait 7 minutes: the window dims, reads `room unknown` and
-  carries a `stale` mark, and its age keeps advancing. A seat with no
-  reading yet says `no reading yet`, never a meter at zero. A window the
-  vendor's latest complete report left out while it still binds keeps its
-  meter and reads `kept from an earlier report` in the same neutral mark as
-  `stale`, never amber or red.
+  carries a `stale` mark, and its age keeps advancing. In the dark theme
+  the stale meter's fill is plainly dimmer than a fresh one beside it; in
+  the light theme the dim is slighter. A seat with no reading yet says
+  `no reading yet`, never a meter at zero. A window the vendor's latest
+  complete report left out while it still binds keeps its meter and reads
+  `kept from an earlier report` in the same neutral mark as `stale`, never
+  amber or red.
 - A polled seat's poll line reads `usage poll: last read accepted <age> ago`
   right after a poll that brought its reading. Block the vendor's usage
   endpoint so the next poll fails: the line reads `usage poll: last attempt
@@ -350,7 +352,9 @@ banner, no retry signal -- silently mislabeled data.
   link, and the tab icon is red. With one of two seats out it reads the
   sentence naming that seat in amber, with an amber icon; with both logged
   in it reads `All routes healthy` with no link. Clicking `see Accounts`
-  opens Accounts and keeps the selected range in the address.
+  opens Accounts and keeps the selected range in the address; on Accounts
+  the status line shows no `see Accounts` link, and it returns when Now is
+  opened again.
 - With a seat still unusable, block `/status/query` in the browser
   devtools (request blocking; it is fetched apart from the aggregate) and
   wait two polls. The status line still reads the seat sentence:
@@ -359,9 +363,10 @@ banner, no retry signal -- silently mislabeled data.
 - With a seat logged out, stop the daemon and wait two polls. The status
   line keeps the same sentence, dimmed, followed by `as of <time> - the
   daemon cannot be reached`; the icon turns grey, even for a broken
-  verdict. It never returns to `Checking routing state`. Start the daemon
-  again: within a poll the current sentence replaces it, the dimming clears
-  and the icon takes that verdict's color again.
+  verdict, and no banner repeats it. It never returns to `Checking routing
+  state`. Start the daemon again: within a poll the current sentence
+  replaces it, the dimming clears and the icon takes that verdict's color
+  again.
 - The Models tab badge counts the lanes whose state is not `ok`: two
   logged-out seats on one model badge `2`, and a lane that is both logged
   out and breaker-open counts once. On Traffic, scoped to that seat's
@@ -455,8 +460,10 @@ For each case check, on Now and on Accounts:
   (`agent-browser network route 'http://127.0.0.1:<port>/status' --abort`;
   or stop the server) and wait two polls. The status line keeps the last
   sentence, dimmed, followed by `as of <time> - the daemon cannot be
-  reached`; tab badges keep their numbers dimmed, never an amber `stale`;
-  the open view keeps its sections, dimmed. Lift the block
+  reached`, and no red banner repeats it; at 200% text the sentence stays
+  on its own line and the note wraps below it; tab badges keep their
+  numbers dimmed, never an amber `stale`; the open view keeps its sections,
+  dimmed. Lift the block
   (`agent-browser network unroute`) and the page recovers at its next
   attempt, which the backoff spaces up to 30 s apart (10 s, 20 s, then 30 s
   after each failed round); Refresh stays disabled until then.

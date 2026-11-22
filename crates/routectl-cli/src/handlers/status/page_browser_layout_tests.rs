@@ -210,6 +210,54 @@ fn page_browser_figures_read_in_full_at_the_narrow_floor() {
     assert!(scrolling > 0, "no table scrolled inside its card at 720 px");
 }
 
+fn run_verdict_outage(setup: &Setup) -> Value {
+    let scenario = browser::Scenario {
+        name: "layout-verdict-outage",
+        hash: "now",
+        snippets: &[LAYOUT_DRIVER],
+        budget_ms: 90_000,
+    };
+    let window = format!("--window-size={},900", setup.width);
+    let preferences = json!({ "webkit": { "webprefs": { "default_font_size": setup.font_px } } });
+    browser::run_scenario_in_profile(&scenario, &[&window], &preferences).result
+}
+
+/// Through an outage the strip alone says the daemon cannot be reached (no
+/// banner), and at 1440 px with the text doubled the sentence keeps its own
+/// line rather than being squeezed into a column beside the note: it reads
+/// on one line, as at the default size. Positive control: at 200% text the
+/// note, link and figures do not all fit beside the sentence, so part of
+/// the strip wraps to a row below it.
+///
+/// Mutation check: drop `flex-wrap: wrap` from `.verdict-lead` -> red (the
+/// sentence wraps beside the note).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_the_outage_strip_keeps_the_sentence_whole_at_double_text_size() {
+    let default = run_verdict_outage(&DEFAULT_TEXT);
+    let doubled = run_verdict_outage(&TEXT_200);
+
+    for (setup, out) in [(&DEFAULT_TEXT, &default), (&TEXT_200, &doubled)] {
+        let at = setup.name;
+        assert_eq!(
+            out["root_font_px"].as_f64(),
+            Some(f64::from(setup.font_px)),
+            "{at}: {out:#}"
+        );
+        assert_eq!(out["banner_hidden"], true, "{at}: {out:#}");
+        assert_eq!(out["link_text"], "see Accounts", "{at}: {out:#}");
+    }
+    assert_eq!(default["text_lines"], 1, "{default:#}");
+    assert_eq!(
+        doubled["text_lines"], default["text_lines"],
+        "the doubled sentence wraps: {doubled:#}"
+    );
+    assert_eq!(
+        doubled["lead_rows_wrapped"], true,
+        "positive control: the doubled strip had to wrap: {doubled:#}"
+    );
+}
+
 /// The audit is not blind: over planted boxes beside the view it flags a
 /// numeral cut by an ellipsis, one clipped without, one pushed past the
 /// window's edge, a scroller the keyboard cannot reach (once as a bare box,

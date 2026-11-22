@@ -372,10 +372,12 @@ fn page_browser_a_refused_attention_panel_keeps_the_verdict_as_not_current() {
 }
 
 /// Following the "see Accounts" link from Now opens the Accounts view and
-/// its address, and the link stays while the verdict does.
+/// its address; on Accounts the strip drops the link to the view now open,
+/// and focus lands on the Accounts tab rather than the page body.
 ///
-/// Mutation check: delete the `selectTab(arg)` call in the `open-view`
-/// action (its preventDefault kept) -> red (the view never opens).
+/// Mutation checks: delete the `selectTab(arg)` call in the `open-view`
+/// action (its preventDefault kept) -> red (the view never opens); drop the
+/// tab focus line there -> red (focus falls to the body).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_the_verdict_link_opens_its_view() {
@@ -386,7 +388,44 @@ fn page_browser_the_verdict_link_opens_its_view() {
     assert_eq!(out["before"]["link_href"], "#accounts", "{out:#}");
     assert_eq!(out["hash"], "#accounts", "{out:#}");
     assert_eq!(out["pane_hidden"], false, "{out:#}");
-    assert_eq!(out["after"]["link_text"], "see Accounts", "{out:#}");
+    assert_eq!(out["after"]["link_children"], 0, "{out:#}");
+    assert_eq!(out["after"]["text"], broken()["text"], "{out:#}");
+    assert_eq!(out["focused"], "tab-accounts", "{out:#}");
+}
+
+/// The strip offers "see Accounts" on every view but Accounts: opened on
+/// Accounts it has no link, and moving Accounts -> Now -> Accounts -> Now
+/// adds and drops it at each tab click, before any poll repaints the strip.
+/// Positive control: the verdict names Accounts, so Now shows the link.
+///
+/// Mutation checks: drop the active-view check in syncVerdictLink -> red
+/// (the link shows on Accounts); drop `renderVerdict()` from
+/// applyViewState -> red (the link lags the view switch).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_the_verdict_link_hides_on_the_view_it_names() {
+    let path = ["now", "accounts", "now"];
+    let row = json!({ "verdict": broken(), "path": path });
+
+    let out = verdict_scenario("verdict-link-follows-view", "accounts", Some(row));
+
+    assert_eq!(out["start"]["link_children"], 0, "{out:#}");
+    assert_eq!(out["start"]["text"], broken()["text"], "{out:#}");
+    assert_eq!(
+        out["rounds_after"], out["rounds_before"],
+        "a poll landed during the switches: {out:#}"
+    );
+    let views = out["views"].as_array().expect("observed views");
+    assert_eq!(views.len(), path.len(), "{out:#}");
+    for (seen, view) in views.iter().zip(path) {
+        assert_eq!(seen["view"], view, "{out:#}");
+        if view == "accounts" {
+            assert_eq!(seen["link_children"], 0, "on {view}: {out:#}");
+        } else {
+            assert_eq!(seen["link_text"], "see Accounts", "on {view}: {out:#}");
+            assert_eq!(seen["link_href"], "#accounts", "on {view}: {out:#}");
+        }
+    }
 }
 
 /// On Traffic at range=month, with the QUERY for the month unanswered, the

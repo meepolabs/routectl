@@ -295,6 +295,73 @@
     if (toggle.getAttribute('aria-expanded') !== 'true') { toggle.click(); }
   }
 
+  // ---- the verdict strip through an outage --------------------------------
+
+  // A sentence as long as a real seat verdict, so the strip has to share its
+  // line with the outage note and the link.
+  var OUTAGE_VERDICT = {
+    severity: 'degraded',
+    text: 'seat-b (b): Not logged in, for 40 min',
+    target: 'accounts'
+  };
+
+  var aggregateDown = false;
+  var innerFetch = window.fetch;
+  window.fetch = function (input, init) {
+    var url = new URL(String(input), location.href);
+    return innerFetch(input, init).then(function (resp) {
+      if (aggregateDown && url.pathname === '/status') { throw new TypeError('Failed to fetch'); }
+      return resp;
+    });
+  };
+
+  function lineCount(node) {
+    var range = document.createRange();
+    range.selectNodeContents(node);
+    var tops = {};
+    Array.prototype.forEach.call(range.getClientRects(), function (r) {
+      if (r.width > 0) { tops[Math.round(r.top)] = true; }
+    });
+    return Object.keys(tops).length;
+  }
+
+  d.scenario('layout-verdict-outage', function () {
+    d.rewrite(function (url, text) {
+      if (url.pathname !== '/status') { return text; }
+      var agg = JSON.parse(text);
+      agg.panels.attention.data.verdict = OUTAGE_VERDICT;
+      return JSON.stringify(agg);
+    });
+    var sentence = document.getElementById('verdict-text');
+    var note = document.getElementById('verdict-note');
+    return d.waitUntil('the served verdict', function () {
+      return sentence.textContent === OUTAGE_VERDICT.text;
+    }).then(function () {
+      aggregateDown = true;
+      return d.waitUntil('the outage note', function () {
+        return !note.hidden && note.textContent.indexOf('cannot be reached') >= 0;
+      }, 30000);
+    }).then(function () {
+      var banner = document.getElementById('banner');
+      var textBox = sentence.getBoundingClientRect();
+      return {
+        root_font_px: parseFloat(getComputedStyle(document.documentElement).fontSize),
+        lead_width: document.querySelector('.verdict-lead').clientWidth,
+        text_width: textBox.width,
+        text_lines: lineCount(sentence),
+        lead_rows_wrapped: Array.prototype.some.call(
+          document.querySelector('.verdict-lead').children,
+          function (child) {
+            return rendered(child) && child.getBoundingClientRect().top >= textBox.bottom - SLACK_PX;
+          }),
+        note: note.textContent,
+        link_text: document.getElementById('verdict-link').textContent,
+        banner_hidden: banner.hidden,
+        banner_text: banner.textContent
+      };
+    });
+  });
+
   d.scenario('layout-check', function () {
     var view = addressView();
     var marker = SETTLED_MARKER[view];

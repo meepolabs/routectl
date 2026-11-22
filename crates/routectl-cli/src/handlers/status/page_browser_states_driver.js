@@ -104,6 +104,18 @@
     return root.querySelectorAll('.unavailable-msg, .incompatible-msg').length;
   }
 
+  var UNREACHABLE = 'the daemon cannot be reached';
+
+  function stripSaysUnreachable() {
+    var note = document.getElementById('verdict-note');
+    return !note.hidden && note.textContent.indexOf(UNREACHABLE) >= 0;
+  }
+
+  function bannerShown() {
+    var banner = document.getElementById('banner');
+    return banner.hidden ? null : { text: banner.textContent, class_name: banner.className };
+  }
+
   function windowButton(name) {
     var btn = query('#windowsel button[data-window="' + name + '"]');
     if (!btn) { throw new Error('no window button ' + name); }
@@ -165,7 +177,10 @@
       return {
         card: textOf('#body-config .unavailable-msg'),
         status: textOf('#status-config'),
-        error_cards: errorCards(document.getElementById('body-config'))
+        error_cards: errorCards(document.getElementById('body-config')),
+        verdict: textOf('#verdict-text'),
+        verdict_note: textOf('#verdict-note'),
+        banner: bannerShown()
       };
     });
   });
@@ -567,6 +582,8 @@
       section_stale: !!section && section.classList.contains('section--stale'),
       status: textOf('#status-traffic'),
       verdict: textOf('#verdict-text'),
+      verdict_note: textOf('#verdict-note'),
+      banner: bannerShown(),
       zero_figures: body.querySelectorAll('.mag-zero').length,
       error_cards: errorCards(body)
     };
@@ -590,9 +607,7 @@
         figures = query(TRAFFIC_FIGURES);
         out.good = trafficOutageObservation(figures);
         down = true;
-        return d.waitUntil('the aggregate to fail', function () {
-          return document.getElementById('banner').hidden === false;
-        }, 15000);
+        return d.waitUntil('the aggregate to fail', stripSaysUnreachable, 15000);
       })
       .then(function () { return d.sleep(500); })
       .then(function () {
@@ -607,6 +622,38 @@
       .then(function () { return d.sleep(300); })
       .then(function () {
         out.recovered = trafficOutageObservation(figures);
+        return out;
+      });
+  });
+
+  // ---- the banner names an overload, never an unreachable daemon ---------
+
+  // A good round, then the aggregate answers 503, then it fails the way an
+  // unreachable daemon does.
+  d.scenario('states-overload-then-unreachable', function () {
+    var mode = null;
+    rules.push(function (entry) {
+      if (!isAggregate(entry) || mode === null) { return null; }
+      return mode === 'overloaded' ? { status: 503 } : { fail: true };
+    });
+    var out = {};
+    return nextAnswer('/status')
+      .then(function () {
+        mode = 'overloaded';
+        return d.waitUntil('the overload banner', bannerShown, 15000);
+      })
+      .then(function () {
+        out.overloaded = { banner: bannerShown(), unreachable: stripSaysUnreachable() };
+        mode = 'unreachable';
+        return nextAnswer('/status', 40000);
+      })
+      .then(function () { return d.sleep(300); })
+      .then(function () {
+        out.unreachable = {
+          banner: bannerShown(),
+          unreachable: stripSaysUnreachable(),
+          verdict: textOf('#verdict-text')
+        };
         return out;
       });
   });
@@ -628,7 +675,7 @@
       figures: textOf(TRAFFIC_FIGURES),
       status: textOf('#status-traffic'),
       error_cards: errorCards(document.getElementById('body-traffic')),
-      banner_shown: document.getElementById('banner').hidden === false
+      aggregate_failed: stripSaysUnreachable()
     };
   }
 
@@ -672,9 +719,7 @@
       .then(function () {
         out.held = heldTrafficObservation();
         aggregateDown = true;
-        return d.waitUntil('the aggregate to fail', function () {
-          return document.getElementById('banner').hidden === false;
-        }, 15000);
+        return d.waitUntil('the aggregate to fail', stripSaysUnreachable, 15000);
       })
       .then(function () { return d.sleep(300); })
       .then(function () {
@@ -689,7 +734,7 @@
         out.traffic_queries_answered = requestsIssued('/status/query');
         aggregateDown = false;
         return d.waitUntil('the aggregate to recover', function () {
-          return document.getElementById('banner').hidden === true;
+          return !stripSaysUnreachable();
         }, 40000);
       })
       .then(function () {

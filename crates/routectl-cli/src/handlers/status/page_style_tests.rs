@@ -780,16 +780,23 @@ fn the_stale_text_scan_reports_opacity_and_a_low_contrast_color() {
     );
 }
 
+fn stale_mark_opacity(css: &str, light: bool) -> f64 {
+    resolve(&theme_tokens(css, light), "--stale-mark-opacity")
+        .parse()
+        .expect("the stale mark opacity is a number")
+}
+
 /// A stale meter's fill is dimmed, and at that opacity every meter color
 /// keeps 3:1 against its track and against the card, in both themes.
+///
+/// Mutation check: set the dark `--stale-mark-opacity` to 0.6 -> red
+/// (`--meter-full` dimmed on `--border` is 2.80:1).
 #[test]
 fn a_dimmed_stale_meter_fill_keeps_three_to_one() {
     let css = style();
     for light in [false, true] {
         let tokens = theme_tokens(&css, light);
-        let alpha: f64 = resolve(&tokens, "--stale-mark-opacity")
-            .parse()
-            .expect("the stale mark opacity is a number");
+        let alpha = stale_mark_opacity(&css, light);
         assert!(alpha < 1.0, "the stale fill is dimmed");
         for meter in ["--meter", "--meter-warn", "--meter-full"] {
             let [r, g, b, _] = srgba(resolve(&tokens, meter));
@@ -804,6 +811,23 @@ fn a_dimmed_stale_meter_fill_keeps_three_to_one() {
             }
         }
     }
+}
+
+/// The dark theme dims a stale meter fill further than the light theme,
+/// whose 0.85 is the lowest that keeps 3:1 there.
+///
+/// Mutation checks: drop the light block's `--stale-mark-opacity` -> red
+/// (light follows the dark 0.65); set the dark value back to 0.85 -> red.
+#[test]
+fn the_dark_theme_dims_a_stale_meter_fill_further_than_light() {
+    let css = style();
+    let (dark, light) = (
+        stale_mark_opacity(&css, false),
+        stale_mark_opacity(&css, true),
+    );
+
+    assert!((light - 0.85).abs() < 1e-9, "light is {light}");
+    assert!(dark < light, "dark {dark} is not dimmer than light {light}");
 }
 
 /// The Now "see Accounts" link, the shared "see <view>" link (Doctor's

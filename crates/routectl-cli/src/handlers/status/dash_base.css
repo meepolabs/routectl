@@ -113,9 +113,11 @@
   --meter-warn: var(--warn);
   --meter-full: var(--neg);
   /* An old reading's meter fill is dimmed by this much and no further: the
-     dimmed fill keeps 3:1 against its track in both themes. Text of an old
-     reading is never dimmed by opacity; it takes --muted instead. */
-  --stale-mark-opacity: 0.85;
+     dimmed fill of every meter color keeps 3:1 against its track and the
+     card. The bright dark-theme fills need a deeper dim to read as old; the
+     light theme cannot go below 0.85 and keep 3:1. Text of an old reading is
+     never dimmed by opacity; it takes --muted instead. */
+  --stale-mark-opacity: 0.65;
 
   /* Value-domain pill palette, derived from the state tokens above so a
      pill can never drift out of contrast with its own theme. The palette
@@ -168,6 +170,8 @@
     --hover: rgba(0, 0, 0, 0.028);
     --skel: rgba(0, 0, 0, 0.06);
     --backdrop: rgba(0, 0, 0, 0.45);
+
+    --stale-mark-opacity: 0.85;
   }
 }
 
@@ -209,9 +213,13 @@ body {
   border-bottom: 1px solid var(--border);
   background: var(--surface);
 }
+/* The sentence keeps its own width and the note, link and figures wrap
+   below it when the line runs out; it stops one dot short of the line so
+   the dot never sits on a line of its own. */
 .verdict-lead {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--sp-2);
   min-width: 0;
   flex: 1 1 auto;
@@ -232,6 +240,7 @@ body {
   letter-spacing: -0.005em;
   color: var(--fg);
   min-width: 0;
+  max-width: calc(100% - 9px - var(--sp-2));
 }
 /* A last known verdict, shown while no current one is: dimmed, with the
    note saying when it was current and why it is not now. Its sentence is

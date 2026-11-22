@@ -55,6 +55,12 @@ fn page_browser_a_failed_refresh_keeps_the_rendered_section_marked_stale() {
     );
 }
 
+/// A first round that cannot reach the daemon shows the error card, and the
+/// strip, with no verdict to keep, says the daemon cannot be reached beside
+/// the start-up text; no banner repeats it.
+///
+/// Mutation check: return a null note for the no-verdict case in
+/// shownVerdict -> red (nothing on the page says the daemon is unreachable).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_a_failure_on_the_first_round_shows_the_error_card() {
@@ -67,6 +73,40 @@ fn page_browser_a_failure_on_the_first_round_shows_the_error_card() {
     assert_eq!(result["error_cards"], 1, "{result:#}");
     assert!(
         text(&result["status"], "the status line").starts_with("no current data: "),
+        "{result:#}"
+    );
+    assert_eq!(result["verdict"], "Checking routing state", "{result:#}");
+    assert_eq!(
+        result["verdict_note"], "the daemon cannot be reached",
+        "{result:#}"
+    );
+    assert_eq!(result["banner"], Value::Null, "{result:#}");
+}
+
+/// An overloaded daemon puts up its warn banner; once the daemon cannot be
+/// reached at all the banner goes and the strip alone says so. Positive
+/// control: the overload banner showed, so a banner was there to remove.
+///
+/// Mutation check: put back `setBanner('error', 'daemon unreachable, backing
+/// off')` for the unreachable case in markTransport -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_an_unreachable_daemon_shows_no_banner_and_an_overload_does() {
+    let result = states_scenario("states-overload-then-unreachable", "now", 90_000);
+    let (overloaded, unreachable) = (&result["overloaded"], &result["unreachable"]);
+
+    assert_eq!(
+        overloaded["banner"]["text"], "status overloaded: showing last known values, backing off",
+        "{result:#}"
+    );
+    assert!(
+        text(&overloaded["banner"]["class_name"], "the banner class").contains("banner--warn"),
+        "{result:#}"
+    );
+    assert_eq!(unreachable["banner"], Value::Null, "{result:#}");
+    assert_eq!(unreachable["unreachable"], true, "{result:#}");
+    assert_ne!(
+        unreachable["verdict"], "Checking routing state",
         "{result:#}"
     );
 }
@@ -412,6 +452,11 @@ fn page_browser_an_unreachable_daemon_marks_the_query_section_stale() {
     assert_eq!(down["zero_figures"], good["zero_figures"], "{down:#}");
     assert_eq!(down["verdict"], good["verdict"], "{down:#}");
     assert!(
+        text(&down["verdict_note"], "the verdict note").ends_with("the daemon cannot be reached"),
+        "{down:#}"
+    );
+    assert_eq!(down["banner"], Value::Null, "{down:#}");
+    assert!(
         text(&down["status"], "the status line").starts_with("stale: last success at "),
         "{down:#}"
     );
@@ -447,7 +492,7 @@ fn page_browser_an_outage_while_a_query_is_held_leaves_it_to_its_answer() {
         "the query is still out: {held:#}"
     );
     assert_eq!(
-        during["banner_shown"], true,
+        during["aggregate_failed"], true,
         "positive control: the aggregate failed while the query was out: {during:#}"
     );
     assert_eq!(

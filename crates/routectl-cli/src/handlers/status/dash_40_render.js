@@ -138,6 +138,9 @@
     renderSourceChanged(name);
   }
 
+  // An unreachable daemon puts up no banner: the verdict strip already says
+  // the daemon cannot be reached, and a banner left by an earlier overload or
+  // timeout would name the wrong cause.
   function markTransport(kind) {
     GET_SOURCES.forEach(function (n) { markSourceTransport(n); });
     if (kind === 'overloaded') {
@@ -145,7 +148,7 @@
     } else if (kind === 'timeout') {
       setBanner('error', 'status request timed out, backing off');
     } else {
-      setBanner('error', 'daemon unreachable, backing off');
+      clearBanner();
     }
   }
 
@@ -653,7 +656,10 @@
       return { kind: 'bad', text: 'Polling stopped - open this page on the bound address', target: null, note: null };
     }
     var known = current || lastVerdict;
-    if (!known) { return { kind: 'idle', text: 'Checking routing state', target: null, note: null }; }
+    if (!known) {
+      var why = attentionUnreachable() ? UNREACHABLE_NOTE : null;
+      return { kind: 'idle', text: 'Checking routing state', target: null, note: why };
+    }
     return {
       kind: VERDICT_KIND[known.severity],
       text: known.text,
@@ -662,13 +668,19 @@
     };
   }
 
-  // A failed refresh means the daemon did not answer; any other state means
-  // it answered without a current verdict.
-  function staleVerdictNote(asOf) {
+  var UNREACHABLE_NOTE = 'the daemon cannot be reached';
+
+  // A failed refresh leaves the attention source stale or dead: the daemon
+  // did not answer.
+  function attentionUnreachable() {
     var state = SOURCES.attention.state;
-    var why = (state === 'stale' || state === 'dead')
-      ? 'the daemon cannot be reached'
-      : 'verdict not current';
+    return state === 'stale' || state === 'dead';
+  }
+
+  // Any state other than a failed refresh means the daemon answered without
+  // a current verdict.
+  function staleVerdictNote(asOf) {
+    var why = attentionUnreachable() ? UNREACHABLE_NOTE : 'verdict not current';
     return 'as of ' + verdictTime(asOf) + ' - ' + why;
   }
 
@@ -678,11 +690,13 @@
   }
 
   // The link to the view a verdict points at, labelled from that view. A
-  // token naming no registered view gets no link. A link already showing the
-  // same view is kept, so keyboard focus on it survives the refresh.
+  // token naming no registered view gets no link, and neither does the view
+  // already open. A link already showing the same view is kept, so keyboard
+  // focus on it survives the refresh.
   function syncVerdictLink(target) {
     var slot = el('verdict-link');
     var view = (typeof target === 'string') ? viewFor(target) : null;
+    if (view && view.id === activeTab) { view = null; }
     var kept = slot.firstElementChild;
     if (kept && (!view || kept.getAttribute('data-arg') !== view.id)) {
       slot.removeChild(kept);
