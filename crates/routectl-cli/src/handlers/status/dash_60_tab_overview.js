@@ -23,6 +23,11 @@
   // What an "At API prices" figure is, said once wherever one is drawn.
   var API_PRICE_NOTE = 'what this traffic would cost on pay-as-you-go API pricing';
 
+  // The two timing columns are read over different requests, so a failing
+  // group's latency can sit under its time to first token.
+  var TTFT_POPULATION = 'over streamed successes';
+  var LATENCY_POPULATION = 'over every request, failures included';
+
   // A partial group with no priced row at all mixes subscription and
   // unpriced rows: there is no subtotal to show.
   var PARTIAL_UNPRICED_TITLE = 'mixed cost kinds with no priced row: no dollar cost to show';
@@ -609,18 +614,15 @@
       sparkline(reqSpark, gap));
   }
 
-  // Time to first token. The headline is the mean over streamed successes;
-  // the figure beside it is the observed maximum. Neither is a percentile, so
-  // the tile says avg and max.
+  // Time to first token at p50 over streamed successes, each bucket's own p50
+  // under it.
   function ttftTile(t, series, gap) {
-    var avg = msParts(t.ttft_avg_ms);
-    var observed = num0(t.ttft_avg_ms) > 0;
-    return kpiTile('Time to first token (avg)',
-      figure(avg.v, avg.u, null),
-      wrappedNote(observed
-        ? 'max ' + msText(t.ttft_max_ms) + ' - avg over streamed successes'
-        : 'no streamed response in this window'),
-      sparkArea(bucketSamples(series, function (m) { return m.ttft_avg_ms; }), gap));
+    var p50 = msParts(t.ttft_p50_ms);
+    var observed = num0(t.ttft_p50_ms) > 0;
+    return kpiTile('Time to first token (p50)',
+      figure(p50.v, p50.u, null),
+      wrappedNote(observed ? 'median ' + TTFT_POPULATION : 'no streamed response in this window'),
+      sparkArea(bucketSamples(series, function (m) { return m.ttft_p50_ms; }), gap));
   }
 
   function fallbackTile(t, series, gap) {

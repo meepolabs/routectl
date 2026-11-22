@@ -482,6 +482,12 @@ list with more narrative.
 
 - **The dashboard Accounts poll line reads plainly and shows its raw token.** A healthy poll reads `usage poll: last read accepted <age> ago`. A poll that answered without changing the reading the row shows (its newest window, or its last reading when it reports no windows, is older than the attempt, or there is none) reads `usage poll: last poll answered <age> ago (no new reading)`, instead of claiming a fresh read beside a stale window or `no reading yet`. Any result other than a plain accepted read also shows its raw token on a `RAW` line under the poll line, drawn and copied as on Now (Tab reaches it, Ctrl+A selects the token alone), in place of the hover-only tooltip.
 
+- **The dashboard Now timing tile leads with the p50, as Traffic does.** The tile reads "Time to first token (p50)": its headline is the median time to first token over streamed successes, the same figure Traffic's TTFT p50 column shows, its note reads "median over streamed successes", and its sparkline plots each bucket's p50. The mean and the maximum are no longer shown on the tile.
+
+- **An expanded dashboard Traffic row reads every value beside its label.** The tail percentiles, error classes and cache-write statement each start on their label's line, and a long statement wraps beside its label rather than dropping under it.
+
+- **A glob alias step on dashboard Traffic says what its "*" matches.** A chain step naming an alias key with a trailing `*` adds a faint `(matches any model name starting with <prefix>)` beside it, for example `via alias claude-sonnet* (matches any model name starting with claude-sonnet)`; other steps are unchanged.
+
 - **The dashboard Doctor tab leads with the needs-attention list.** Doctor now shows the same list as Now, and its one headline number is that list's count, the same number the tab badge shows; the old Fail/Warn/Pass verdict card is gone (the findings below it are unchanged). A line names the model problems the Models view lists, as problems and as lanes, with a link to Models. Commands quoted in a finding's remediation show as focusable code without their backticks.
 
 - **The dashboard Config tab shows seat pools and prices as written.** A Pools card lists each pool's seat selection and its members by provider entry and login label. Price labels keep the config's spelling, so a cache lifetime reads 5m, 30m or 1h rather than 30M, cache-write prices come in duration order, and each price sits under its label so a model's prices wrap evenly at narrower widths.

@@ -1,5 +1,6 @@
 // The Now KPI tiles in a real headless Chrome: a bucket with no reported
-// value draws as a gap, a reported 0 draws on the baseline; the cost tile
+// value draws as a gap, a reported 0 draws on the baseline; the timing tile
+// leads with the p50; the cost tile
 // keeps spend and the API-price equivalent apart and qualifies a partial
 // cost; an empty ledger names the base URL.
 // `include!`d into a child module of `page::tests` beside `browser`; the
@@ -32,6 +33,17 @@ fn run(name: &'static str) -> Vec<Value> {
         .as_array()
         .expect("one observation per round")
         .clone()
+}
+
+/// The one observation a single-shot scenario reports.
+fn run_one(name: &'static str) -> Value {
+    let scenario = browser::Scenario {
+        name,
+        hash: "now",
+        snippets: &[TILES_DRIVER],
+        budget_ms: TILES_BUDGET_MS,
+    };
+    browser::run_scenario(&scenario).result
 }
 
 /// The polylines of one series as `[[x, y], ...]` runs.
@@ -104,6 +116,38 @@ fn page_browser_tiles_a_zero_ttft_bucket_sits_on_the_baseline() {
             .enumerate()
             .all(|(i, p)| i == 2 || p.1 < SPARK_BASELINE_Y),
         "only the zero bucket is on the baseline: {spark:#}"
+    );
+}
+
+/// The timing tile leads with the p50 time to first token, as Traffic does:
+/// its title says p50, its headline is the totals' `ttft_p50_ms` where the
+/// mean differs, its note names the population Traffic names, and its
+/// sparkline rises with the buckets' p50 while their mean falls.
+///
+/// Mutation checks: ttftTile reading `t.ttft_avg_ms` for the headline -> red
+/// (9.4s); its sparkline reading `m.ttft_avg_ms` -> red (the line falls).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_tiles_the_timing_tile_leads_with_the_p50() {
+    let out = &run_one("tiles-ttft-p50");
+
+    let labels = out["labels"].as_array().expect("labels");
+    assert!(
+        labels.contains(&json!("Time to first token (p50)")),
+        "{out:#}"
+    );
+    assert!(
+        !labels.contains(&json!("Time to first token (avg)")),
+        "{out:#}"
+    );
+    assert_eq!(out["value"], "2.5s", "{out:#}");
+    assert_eq!(out["sub"], "median over streamed successes", "{out:#}");
+    let line = runs(&out["spark"], "a");
+    assert_eq!(line.len(), 1, "{out:#}");
+    assert_eq!(xs(&line[0]), bucket_xs(&[0, 1, 2, 3, 4, 5]), "{out:#}");
+    assert!(
+        line[0].windows(2).all(|w| w[1].1 < w[0].1),
+        "each later bucket's larger p50 draws higher: {out:#}"
     );
 }
 

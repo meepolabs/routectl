@@ -202,9 +202,14 @@ banner, no retry signal -- silently mislabeled data.
   OS reduced-motion preference on (no value animates, nothing is lost).
   Expanded Config model rows stay readable: no label runs into another
   pair's value, nothing is cut off at the row edge, and a pair too wide for
-  its column drops the value under its label. The Now EST. COST, TIME TO
-  FIRST TOKEN and CACHE HIT notes wrap instead of truncating, and hovering
-  each shows the full sentence.
+  its column drops the value under its label. In an expanded Traffic row
+  every value starts beside its label, on the label's first line, the
+  cache-write statement wrapping beside it rather than under it; on Traffic
+  by alias a glob step such as `via alias claude-sonnet*` adds a faint
+  `(matches any model name starting with claude-sonnet)` and a plain step
+  adds nothing. The Now EST. COST, TIME TO FIRST TOKEN (P50) and CACHE HIT
+  notes wrap instead of truncating, and hovering each shows the full
+  sentence.
 
 ## 5. Doctor tab capability writes
 

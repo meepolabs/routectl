@@ -96,6 +96,7 @@
     return {
       label: textIn(line, '.traffic-steplabel'),
       name: textIn(line, '.traffic-stepname'),
+      hint: textIn(line, '.traffic-stephint'),
       req: count ? parseInt(figures[0].textContent, 10) : null,
       share: figures.length > 1 ? figures[1].textContent : null,
       text: line.textContent,
@@ -114,14 +115,20 @@
     };
   }
 
-  // One row's opened detail: the dt -> dd pairs in order, the unpriced
-  // remainder sentence (null when none is drawn), then the alias chain and
-  // the missing prices, each a block of lines.
+  function box(node) {
+    var r = node.getBoundingClientRect();
+    return { left: r.left, right: r.right, top: r.top, bottom: r.bottom };
+  }
+
+  // One row's opened detail: the dt -> dd pairs in order with their boxes,
+  // the unpriced remainder sentence (null when none is drawn), then the
+  // alias chain and the missing prices, each a block of lines.
   function detailOf(rowId) {
     var detail = byId(rowId + '-detail');
     return {
       pairs: Array.prototype.map.call(detail.querySelectorAll('.def'), function (def) {
-        return { term: def.querySelector('dt').textContent, text: def.querySelector('dd').textContent };
+        var dt = def.querySelector('dt'), dd = def.querySelector('dd');
+        return { term: dt.textContent, text: dd.textContent, term_box: box(dt), value_box: box(dd) };
       }),
       remainder: textIn(detail, '.traffic-remainder'),
       remainders: detail.querySelectorAll('.traffic-remainder').length,

@@ -4,7 +4,8 @@
    without scrolling card by card. An error rate colors only past the
    degraded and broken thresholds. An expanded row puts its alias chain and
    its missing prices in blocks of their own under the pairs, one line each,
-   so a chain reads top to bottom in step order. */
+   so a chain reads top to bottom in step order. A glob step's faint hint
+   says what its trailing "*" matches. */
 /* A failed read's technical code, a faint line under its plain sentence. */
 .unavailable-code {
   display: block;
@@ -88,6 +89,23 @@
   font-family: var(--font-mono);
   color: var(--fg);
   overflow-wrap: anywhere;
+}
+.traffic-stephint {
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+}
+/* Every value starts beside its label, on the label's first line: a label
+   takes at most 40% of its pair and wraps there, and a long statement wraps
+   in the rest, never dropping under the label. The columns are wider than
+   the shared grid's so a cache-write statement keeps a readable measure. */
+.deflist.traffic-pairs {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr));
+}
+.deflist.traffic-pairs .def {
+  display: grid;
+  grid-template-columns: fit-content(40%) minmax(0, 1fr);
+  align-items: baseline;
 }
 
 /* ---- models: one row per model lane ----

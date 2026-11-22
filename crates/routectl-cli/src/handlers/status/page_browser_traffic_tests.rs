@@ -457,6 +457,133 @@ fn page_browser_traffic_alias_chain_reads_in_order_and_adds_up() {
     );
 }
 
+/// The shared fixture config plus `wide`, a chain whose first step is the
+/// glob alias key `son*` and whose second names the plain alias `mid`.
+fn glob_alias_config() -> routectl_router::Config {
+    let mut config = nested_alias_config();
+    let chain = |steps: &[&str]| {
+        routectl_router::AliasValue::Chain(steps.iter().map(|s| (*s).to_owned()).collect())
+    };
+    config.aliases.insert("son*".into(), chain(&["sonnet"]));
+    config
+        .aliases
+        .insert("wide".into(), chain(&["son*", "mid", "codex-mini"]));
+    config
+}
+
+/// A glob alias step says what its trailing `*` matches, beside its name; a
+/// plain alias step and a model step carry no such hint.
+///
+/// Mutation check: globStepHint returning null always -> red (the `son*`
+/// step has no hint); its trailing-`*` test dropped -> red (`via alias mid`
+/// carries one).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_traffic_a_glob_alias_step_explains_its_star() {
+    let seeds: Vec<crate::handlers::status::query::fixture::Seed<'_>> = [
+        ("wide-1", "sonnet", "anthropic"),
+        ("wide-2", "glm", "compat"),
+        ("wide-3", "codex-mini", "codex"),
+    ]
+    .into_iter()
+    .map(|(id, model, provider)| (id, 1, "wide", Some(model), Some(provider), None, "ok", None))
+    .collect();
+    let answer = served_answer(
+        glob_alias_config(),
+        &seeds,
+        &json!({"window": "today", "group_by": "alias"}),
+    );
+    let wide = group(&answer, "wide");
+    let kinds: Vec<&str> = wide["steps"]
+        .as_array()
+        .expect("server steps")
+        .iter()
+        .map(|s| s["kind"].as_str().expect("a kind"))
+        .collect();
+    assert_eq!(kinds, ["alias", "alias", "model"], "{wide:#}");
+
+    let out = detail_run("traffic?group=alias", "alias", answer, "wide");
+
+    let lines = block_lines(&out, "chain");
+    let named: Vec<(&str, &Value)> = lines[..3]
+        .iter()
+        .map(|l| (l["name"].as_str().expect("a step name"), &l["hint"]))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            (
+                "via alias son*",
+                &json!("(matches any model name starting with son)")
+            ),
+            ("via alias mid", &Value::Null),
+            ("codex-mini", &Value::Null),
+        ],
+        "{out:#}"
+    );
+}
+
+/// Every label:value pair of an opened row reads the same way: its value
+/// starts beside its label, on the label's first line, whether the value is
+/// a short pair of timings or a statement that wraps over several lines.
+///
+/// Mutation check: drop the `.deflist.traffic-pairs .def` grid rule -> red
+/// (the long cache-write statement drops under its label).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_traffic_every_detail_value_sits_beside_its_label() {
+    let answer = dense_with(&[(
+        "model-01",
+        json!({
+            "cache_write_present": 1,
+            "cache_write_tokens": 2_000_000,
+            "cache_write_unknown_tokens": 1_234_567,
+            "errors": 3,
+            "errors_by_class": {"rate_limited": 2, "network_error": 1},
+        }),
+    )]);
+
+    for width in ["--window-size=1440,987", "--window-size=720,987"] {
+        let out = browser::run_scenario_with(
+            &traffic_scenario(
+                "traffic-observe",
+                "traffic",
+                &[
+                    ("routectlTrafficAnswers", json!({ "model": answer.clone() })),
+                    ("routectlTrafficOpen", json!([id_key("model-01")])),
+                ],
+            ),
+            &[width],
+        )
+        .result;
+
+        let pairs = out["details"][id_key("model-01")]["pairs"]
+            .as_array()
+            .unwrap_or_else(|| panic!("pairs in {out:#}"));
+        assert_eq!(pairs.len(), 4, "{width}: {out:#}");
+        let cache = &pairs[3];
+        assert!(
+            cache["value_box"]["bottom"].as_f64() > cache["term_box"]["bottom"].as_f64(),
+            "positive control: the cache-write statement runs past its label's line: {width}: \
+             {cache:#}"
+        );
+        for pair in pairs {
+            let (term, value) = (&pair["term_box"], &pair["value_box"]);
+            let f = |b: &Value, k: &str| b[k].as_f64().expect("a box edge");
+            assert!(
+                f(value, "left") >= f(term, "right"),
+                "{width}: `{}` value starts left of its label's end: {pair:#}",
+                pair["term"]
+            );
+            assert!(
+                (f(value, "top") - f(term, "top")).abs() < 4.0,
+                "{width}: `{}` value does not start on its label's line: {pair:#}",
+                pair["term"]
+            );
+        }
+    }
+}
+
 /// A share above zero that rounds to no whole percent reads "<1", in a chain
 /// line and in the cache-write statement; a share that rounds to one or more
 /// keeps its number.

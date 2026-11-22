@@ -80,19 +80,48 @@
       });
   }
 
-  var TTFT = 'Time to first token (avg)';
+  var TTFT = 'Time to first token (p50)';
 
   d.scenario('tiles-ttft-null-bucket', function () {
     return acrossRounds(TTFT, [
-      { ttft_avg_ms: [100, 200, 300, 150, 120, 180] },
-      { ttft_avg_ms: [100, 200, null, 150, 120, 180] }
+      { ttft_p50_ms: [100, 200, 300, 150, 120, 180] },
+      { ttft_p50_ms: [100, 200, null, 150, 120, 180] }
     ]);
   });
 
   d.scenario('tiles-ttft-zero-bucket', function () {
     return acrossRounds(TTFT, [
-      { ttft_avg_ms: [100, 200, 0, 150, 120, 180] }
+      { ttft_p50_ms: [100, 200, 0, 150, 120, 180] }
     ]);
+  });
+
+  // Totals and buckets whose mean and median disagree, so a tile reading the
+  // mean anywhere shows it: the headline, its note and the sparkline.
+  d.scenario('tiles-ttft-p50', function () {
+    d.rewrite(function (url, text) {
+      if (url.pathname !== '/status/query') { return text; }
+      var panel = JSON.parse(text);
+      if (!panel.data || !panel.data.series) { return text; }
+      panel.data.totals.ttft_avg_ms = 9400;
+      panel.data.totals.ttft_max_ms = 61000;
+      panel.data.totals.ttft_p50_ms = 2500;
+      return JSON.stringify(panel);
+    });
+    rewriteSeries([{
+      ttft_avg_ms: [600, 500, 400, 300, 200, 100],
+      ttft_p50_ms: [100, 200, 300, 400, 500, 600]
+    }]);
+    return d.waitUntil('the ' + TTFT + ' tile', function () { return tileByLabel(TTFT); })
+      .then(function () {
+        var tile = tileByLabel(TTFT);
+        return {
+          labels: Array.prototype.map.call(document.querySelectorAll('#body-now .kpi-label'),
+            function (l) { return l.textContent; }),
+          value: tile.querySelector('.kpi-value').textContent,
+          sub: tile.querySelector('.kpi-sub').textContent,
+          spark: sparkOf(TTFT)
+        };
+      });
   });
 
   d.scenario('tiles-cache-write-absent', function () {

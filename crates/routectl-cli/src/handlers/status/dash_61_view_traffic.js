@@ -18,11 +18,6 @@
   var ERROR_RATE_DEGRADED_PCT = 5;
   var ERROR_RATE_BROKEN_PCT = 50;
 
-  // The two timing columns are read over different requests, so a failing
-  // group's latency can sit under its time to first token.
-  var TTFT_POPULATION = 'over streamed successes';
-  var LATENCY_POPULATION = 'over every request, failures included';
-
   var TRAFFIC_READ_FAILED = "Couldn't read traffic from routectl";
 
   // The missing-price dimension the server names for cache writes of unknown
@@ -152,6 +147,7 @@
       equivalentFigure(m),
       cacheHitFigure(m.cache_hit_pct)
     ], trafficTimingPairs(m));
+    markTrafficPairs(tbl);
     appendDetailBlocks(tbl, [
       unpricedRemainderLine(m), aliasChainBlock(g), missingPriceBlock(trafficMissingPrices(m))
     ]);
@@ -241,8 +237,15 @@
     ];
   }
 
+  // Every pair of the expanded row reads its value beside its label, however
+  // long the value; xrow appends a row's detail row last.
+  function markTrafficPairs(tbl) {
+    var list = tbl.tb.lastChild.querySelector('.deflist');
+    if (list) { list.classList.add('traffic-pairs'); }
+  }
+
   // The blocks that read as lists rather than label:value pairs sit under the
-  // pairs, each a block of its own. xrow appends a row's detail row last.
+  // pairs, each a block of its own.
   function appendDetailBlocks(tbl, blocks) {
     var cell = tbl.tb.lastChild.firstChild;
     blocks.forEach(function (block) { if (block) { cell.appendChild(block); } });
@@ -379,11 +382,26 @@
     }
     g.steps.forEach(function (s, i) {
       var name = s.kind === ALIAS_STEP_KIND ? 'via alias ' + s.step : s.step;
-      block.appendChild(chainLine('Step ' + (i + 1), name, s.requests, total));
+      var line = chainLine('Step ' + (i + 1), name, s.requests, total);
+      var hint = globStepHint(s);
+      if (hint) { line.insertBefore(hint, line.querySelector('.traffic-stepname').nextSibling); }
+      block.appendChild(line);
     });
     block.appendChild(chainLine('off chain', null, g.off_chain, total));
     block.appendChild(chainLine('not dispatched', null, g.not_dispatched, total));
     return block;
+  }
+
+  // An alias key ending in "*" is the router's one glob form, a prefix match
+  // on the requested name; no other alias key may hold a "*".
+  function globStepHint(s) {
+    var isGlob = s.kind === ALIAS_STEP_KIND && s.step.length > 1 &&
+      s.step.charAt(s.step.length - 1) === '*';
+    if (!isGlob) { return null; }
+    var hint = document.createElement('span');
+    hint.className = 'traffic-stephint';
+    hint.textContent = '(matches any model name starting with ' + s.step.slice(0, -1) + ')';
+    return hint;
   }
 
   function chainLine(label, name, count, total) {
