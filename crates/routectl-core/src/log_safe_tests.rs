@@ -832,9 +832,35 @@ type KeptMember = (&'static str, serde_json::Value);
 
 /// One wire shape whose model- or user-written fields must redact: row
 /// name, body, and the structural members that must stay visible.
-fn tool_text_cases() -> Vec<(&'static str, serde_json::Value, Vec<KeptMember>)> {
+type RedactionRow = (&'static str, serde_json::Value, Vec<KeptMember>);
+
+/// For each row: with redaction off the body still carries the sentinel
+/// (the fixture can show a leak); with it on, no sentinel remains and
+/// every structural member keeps its value. Failures are collected so one
+/// run names every failing row.
+fn assert_rows_redact_and_keep_structure(rows: Vec<RedactionRow>) {
+    let mut failures = Vec::new();
+    for (row, body, structural) in rows {
+        let off = redact_prompts_with_flag(&body, false).to_string();
+        assert!(off.contains(TOOL_TEXT_SENTINEL), "{row}: control");
+
+        let on = redact_prompts_with_flag(&body, true);
+        if on.to_string().contains(TOOL_TEXT_SENTINEL) {
+            failures.push(format!("{row}: leaked: {on}"));
+        }
+        for (pointer, expected) in structural {
+            if on.pointer(pointer) != Some(&expected) {
+                failures.push(format!("{row}: {pointer} != {expected}: {on}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn redact_shell_call_actions_keep_structural_keys() {
     let s = TOOL_TEXT_SENTINEL;
-    vec![
+    assert_rows_redact_and_keep_structure(vec![
         (
             "responses local_shell_call action",
             json!({"output": [{"type": "local_shell_call", "id": "lsc_1", "call_id": "call_1",
@@ -850,6 +876,28 @@ fn tool_text_cases() -> Vec<(&'static str, serde_json::Value, Vec<KeptMember>)> 
                 ("/output/0/action/timeout_ms", json!(1000)),
             ],
         ),
+        (
+            "responses shell_call action commands",
+            json!({"input": [{"type": "shell_call", "id": "sh_1", "call_id": "call_4",
+                "status": "completed", "action": {"commands": [format!("grep {s} a.txt"), "ls"],
+                "working_directory": format!("/work/{s}"), "env": {"K": s},
+                "timeout_ms": 500, "max_output_length": 4096}}]}),
+            vec![
+                ("/input/0/type", json!("shell_call")),
+                ("/input/0/id", json!("sh_1")),
+                ("/input/0/call_id", json!("call_4")),
+                ("/input/0/status", json!("completed")),
+                ("/input/0/action/timeout_ms", json!(500)),
+                ("/input/0/action/max_output_length", json!(4096)),
+            ],
+        ),
+    ]);
+}
+
+#[test]
+fn redact_web_search_call_action_text_keeps_action_type() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![
         (
             "responses web_search_call search",
             json!({"output": [{"type": "web_search_call", "id": "ws_1", "status": "completed",
@@ -880,16 +928,185 @@ fn tool_text_cases() -> Vec<(&'static str, serde_json::Value, Vec<KeptMember>)> 
                 ("/output/0/action/type", json!("find_in_page")),
             ],
         ),
+    ]);
+}
+
+#[test]
+fn redact_image_generation_call_prompt_and_result() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![(
+        "responses image_generation_call",
+        json!({"output": [{"type": "image_generation_call", "id": "ig_1", "status": "completed",
+            "revised_prompt": s, "result": format!("{s}QUJDRA==")}]}),
+        vec![
+            ("/output/0/type", json!("image_generation_call")),
+            ("/output/0/id", json!("ig_1")),
+            ("/output/0/status", json!("completed")),
+        ],
+    )]);
+}
+
+#[test]
+fn redact_apply_patch_call_operation_diff_and_path() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![(
+        "responses apply_patch_call operation",
+        json!({"output": [{"type": "apply_patch_call", "id": "ap_1", "call_id": "call_5",
+            "status": "completed", "operation": {"type": "update_file",
+            "path": format!("src/{s}.rs"), "diff": format!("@@ -1 +1 @@\n-a\n+{s}\n")}}]}),
+        vec![
+            ("/output/0/type", json!("apply_patch_call")),
+            ("/output/0/id", json!("ap_1")),
+            ("/output/0/call_id", json!("call_5")),
+            ("/output/0/status", json!("completed")),
+            ("/output/0/operation/type", json!("update_file")),
+        ],
+    )]);
+}
+
+#[test]
+fn redact_code_interpreter_call_code_and_logs() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![(
+        "responses code_interpreter_call",
+        json!({"output": [{"type": "code_interpreter_call", "id": "ci_1", "status": "completed",
+            "container_id": "cntr_1", "code": format!("print('{s}')"), "outputs": [
+                {"type": "logs", "logs": s},
+                {"type": "image", "url": "https://example.com/plot.png"}]}]}),
+        vec![
+            ("/output/0/type", json!("code_interpreter_call")),
+            ("/output/0/id", json!("ci_1")),
+            ("/output/0/status", json!("completed")),
+            ("/output/0/container_id", json!("cntr_1")),
+            ("/output/0/outputs/0/type", json!("logs")),
+            ("/output/0/outputs/1/type", json!("image")),
+            (
+                "/output/0/outputs/1/url",
+                json!("https://example.com/plot.png"),
+            ),
+        ],
+    )]);
+}
+
+#[test]
+fn redact_file_search_call_queries() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![(
+        "responses file_search_call",
+        json!({"output": [{"type": "file_search_call", "id": "fs_1", "status": "completed",
+            "queries": [s, format!("{s} again")], "results": null}]}),
+        vec![
+            ("/output/0/type", json!("file_search_call")),
+            ("/output/0/id", json!("fs_1")),
+            ("/output/0/status", json!("completed")),
+        ],
+    )]);
+}
+
+#[test]
+fn redact_computer_call_action_keeps_action_type() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![
         (
-            "responses image_generation_call",
-            json!({"output": [{"type": "image_generation_call", "id": "ig_1", "status": "completed",
-                "revised_prompt": s, "result": format!("{s}QUJDRA==")}]}),
+            "responses computer_call keypress",
+            json!({"output": [{"type": "computer_call", "id": "cu_1", "call_id": "call_6",
+                "status": "completed", "pending_safety_checks": [],
+                "action": {"type": "keypress", "keys": ["CTRL", s]}}]}),
             vec![
-                ("/output/0/type", json!("image_generation_call")),
-                ("/output/0/id", json!("ig_1")),
+                ("/output/0/type", json!("computer_call")),
+                ("/output/0/id", json!("cu_1")),
+                ("/output/0/call_id", json!("call_6")),
                 ("/output/0/status", json!("completed")),
+                ("/output/0/action/type", json!("keypress")),
             ],
         ),
+        (
+            "responses computer_call type",
+            json!({"input": [{"type": "computer_call", "id": "cu_2", "call_id": "call_7",
+                "status": "completed", "action": {"type": "type", "text": s}}]}),
+            vec![
+                ("/input/0/call_id", json!("call_7")),
+                ("/input/0/action/type", json!("type")),
+            ],
+        ),
+        (
+            "responses computer_call batched actions",
+            json!({"output": [{"type": "computer_call", "id": "cu_3", "call_id": "call_8",
+                "status": "completed", "actions": [
+                    {"type": "type", "text": s},
+                    {"type": "keypress", "keys": [s]}]}]}),
+            vec![
+                ("/output/0/call_id", json!("call_8")),
+                ("/output/0/actions/0/type", json!("type")),
+                ("/output/0/actions/1/type", json!("keypress")),
+            ],
+        ),
+    ]);
+}
+
+#[test]
+fn redact_mcp_item_error_and_approval_reason() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![
+        (
+            "responses mcp_call error",
+            json!({"output": [{"type": "mcp_call", "id": "mcp_1", "server_label": "docs",
+                "name": "search", "arguments": "{}", "output": null,
+                "error": format!("tool failed on {s}")}]}),
+            vec![
+                ("/output/0/type", json!("mcp_call")),
+                ("/output/0/id", json!("mcp_1")),
+                ("/output/0/server_label", json!("docs")),
+                ("/output/0/name", json!("search")),
+            ],
+        ),
+        (
+            "responses mcp_approval_response reason",
+            json!({"input": [{"type": "mcp_approval_response", "id": "mcpr_1",
+                "approval_request_id": "mcpa_1", "approve": false, "reason": s}]}),
+            vec![
+                ("/input/0/type", json!("mcp_approval_response")),
+                ("/input/0/approval_request_id", json!("mcpa_1")),
+                ("/input/0/approve", json!(false)),
+            ],
+        ),
+    ]);
+}
+
+#[test]
+fn redact_responses_prompt_template_variables_whole() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![(
+        "responses prompt.variables",
+        json!({"model": "gpt-5", "prompt": {"id": "pmpt_1", "version": "2",
+            "variables": {"customer": s, s: {"type": "input_text", "text": s}}}}),
+        vec![
+            ("/model", json!("gpt-5")),
+            ("/prompt/id", json!("pmpt_1")),
+            ("/prompt/version", json!("2")),
+            ("/prompt/variables", json!({"redacted": true})),
+        ],
+    )]);
+}
+
+#[test]
+fn redact_responses_bare_string_input() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![(
+        "responses top-level string input",
+        json!({"model": "gpt-5", "input": format!("hello {s}"), "stream": true}),
+        vec![
+            ("/model", json!("gpt-5")),
+            ("/stream", json!(true)),
+            ("/input", json!(format!("<redacted len={}>", s.len() + 6))),
+        ],
+    )]);
+}
+
+#[test]
+fn redact_object_tool_arguments_collapse() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![
         (
             "responses tool_search_call object arguments",
             json!({"input": [{"type": "tool_search_call", "call_id": "call_2", "status": "completed",
@@ -910,16 +1127,66 @@ fn tool_text_cases() -> Vec<(&'static str, serde_json::Value, Vec<KeptMember>)> 
                 ("/messages/0/tool_calls/0/function/name", json!("lookup")),
             ],
         ),
+    ]);
+}
+
+#[test]
+fn redact_custom_tool_call_object_input_collapses() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![(
+        "responses custom_tool_call object input",
+        json!({"input": [{"type": "custom_tool_call", "call_id": "ctc_2", "name": "exec",
+            "input": {"code": s}}]}),
+        vec![
+            ("/input/0/type", json!("custom_tool_call")),
+            ("/input/0/call_id", json!("ctc_2")),
+            ("/input/0/name", json!("exec")),
+            ("/input/0/input", json!({"redacted": true})),
+        ],
+    )]);
+}
+
+#[test]
+fn redact_chat_custom_tool_call_input() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![
         (
-            "responses custom_tool_call object input",
-            json!({"input": [{"type": "custom_tool_call", "call_id": "ctc_2", "name": "exec",
-                "input": {"code": s}}]}),
+            "chat response custom.input string",
+            json!({"choices": [{"index": 0, "message": {"role": "assistant", "content": null,
+                "tool_calls": [{"id": "call_9", "type": "custom",
+                "custom": {"name": "exec", "input": s}}]}}]}),
             vec![
-                ("/input/0/type", json!("custom_tool_call")),
-                ("/input/0/call_id", json!("ctc_2")),
-                ("/input/0/name", json!("exec")),
+                ("/choices/0/message/role", json!("assistant")),
+                ("/choices/0/message/tool_calls/0/id", json!("call_9")),
+                ("/choices/0/message/tool_calls/0/type", json!("custom")),
+                ("/choices/0/message/tool_calls/0/custom/name", json!("exec")),
+                (
+                    "/choices/0/message/tool_calls/0/custom/input",
+                    json!(format!("<redacted len={}>", s.len())),
+                ),
             ],
         ),
+        (
+            "chat history custom.input object",
+            json!({"messages": [{"role": "assistant", "content": null,
+                "tool_calls": [{"id": "call_10", "type": "custom",
+                "custom": {"name": "exec", "input": {"code": s}}}]}]}),
+            vec![
+                ("/messages/0/tool_calls/0/id", json!("call_10")),
+                ("/messages/0/tool_calls/0/custom/name", json!("exec")),
+                (
+                    "/messages/0/tool_calls/0/custom/input",
+                    json!({"redacted": true}),
+                ),
+            ],
+        ),
+    ]);
+}
+
+#[test]
+fn redact_anthropic_server_and_mcp_tool_use_input() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![
         (
             "anthropic server_tool_use input",
             json!({"messages": [{"role": "assistant", "content": [{"type": "server_tool_use",
@@ -941,6 +1208,13 @@ fn tool_text_cases() -> Vec<(&'static str, serde_json::Value, Vec<KeptMember>)> 
                 ("/content/0/server_name", json!("docs")),
             ],
         ),
+    ]);
+}
+
+#[test]
+fn redact_text_leaf_keys_output_and_reasoning() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![
         (
             "anthropic code_execution_tool_result",
             json!({"content": [{"type": "code_execution_tool_result", "tool_use_id": "srvtoolu_2",
@@ -967,6 +1241,83 @@ fn tool_text_cases() -> Vec<(&'static str, serde_json::Value, Vec<KeptMember>)> 
             ],
         ),
         (
+            "chat choices[].message reasoning_content",
+            json!({"id": "chatcmpl-1", "choices": [{"index": 0, "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "a", "reasoning_content": s}}]}),
+            vec![
+                ("/id", json!("chatcmpl-1")),
+                ("/choices/0/finish_reason", json!("stop")),
+                ("/choices/0/message/role", json!("assistant")),
+                (
+                    "/choices/0/message/reasoning_content",
+                    json!(format!("<redacted len={}>", s.len())),
+                ),
+            ],
+        ),
+        (
+            "chat assembled stream document reasoning_content",
+            json!({"id": "chatcmpl-ds-sse-001", "model": "deepseek-reasoner", "choices": [{
+                "index": 0, "message": {"role": "assistant", "reasoning_content": s,
+                "content": "The answer."}, "finish_reason": "stop"}]}),
+            vec![
+                ("/model", json!("deepseek-reasoner")),
+                ("/choices/0/message/role", json!("assistant")),
+            ],
+        ),
+        (
+            "chat assistant history reasoning_content",
+            json!({"model": "deepseek-reasoner", "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a", "reasoning_content": s}]}),
+            vec![
+                ("/model", json!("deepseek-reasoner")),
+                ("/messages/1/role", json!("assistant")),
+            ],
+        ),
+    ]);
+}
+
+#[test]
+fn redact_reasoning_summary_detail_summary() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![
+        (
+            "chat choices[].message reasoning_details summary",
+            json!({"choices": [{"index": 0, "message": {"role": "assistant", "content": "a",
+                "reasoning_details": [{"type": "reasoning.summary", "summary": s,
+                "format": "openai-responses-v1", "index": 0}]}}]}),
+            vec![
+                (
+                    "/choices/0/message/reasoning_details/0/type",
+                    json!("reasoning.summary"),
+                ),
+                (
+                    "/choices/0/message/reasoning_details/0/format",
+                    json!("openai-responses-v1"),
+                ),
+                ("/choices/0/message/reasoning_details/0/index", json!(0)),
+            ],
+        ),
+        (
+            "chat assistant history reasoning_details summary",
+            json!({"messages": [{"role": "assistant", "content": "a",
+                "reasoning_details": [{"type": "reasoning.summary", "summary": s, "index": 1}]}]}),
+            vec![
+                (
+                    "/messages/0/reasoning_details/0/type",
+                    json!("reasoning.summary"),
+                ),
+                ("/messages/0/reasoning_details/0/index", json!(1)),
+            ],
+        ),
+    ]);
+}
+
+#[test]
+fn redact_source_and_document_titles() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![
+        (
             "anthropic web_search_result title",
             json!({"content": [{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_4",
                 "content": [{"type": "web_search_result", "title": s,
@@ -980,6 +1331,88 @@ fn tool_text_cases() -> Vec<(&'static str, serde_json::Value, Vec<KeptMember>)> 
                 ),
             ],
         ),
+        (
+            "anthropic search_result title",
+            json!({"messages": [{"role": "user", "content": [{"type": "search_result",
+                "source": "https://example.com/kb", "title": s, "content": []}]}]}),
+            vec![
+                ("/messages/0/content/0/type", json!("search_result")),
+                (
+                    "/messages/0/content/0/source",
+                    json!("https://example.com/kb"),
+                ),
+            ],
+        ),
+        (
+            "anthropic document context",
+            json!({"messages": [{"role": "user", "content": [{"type": "document",
+                "source": {"type": "url", "url": "https://example.com/a.pdf"},
+                "context": format!("about {s}")}]}]}),
+            vec![
+                ("/messages/0/content/0/type", json!("document")),
+                ("/messages/0/content/0/source/type", json!("url")),
+            ],
+        ),
+    ]);
+}
+
+#[test]
+fn redact_anthropic_text_document_source_data_at_any_length() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![
+        (
+            "anthropic user document text source",
+            json!({"messages": [{"role": "user", "content": [{"type": "document",
+                "source": {"type": "text", "media_type": "text/plain", "data": s}}]}]}),
+            vec![
+                ("/messages/0/content/0/source/type", json!("text")),
+                (
+                    "/messages/0/content/0/source/media_type",
+                    json!("text/plain"),
+                ),
+            ],
+        ),
+        (
+            "anthropic web_fetch_tool_result text source",
+            json!({"content": [{"type": "web_fetch_tool_result", "tool_use_id": "srvtoolu_5",
+                "content": {"type": "web_fetch_result", "url": "https://example.com/a.txt",
+                "content": {"type": "document",
+                "source": {"type": "text", "media_type": "text/plain", "data": s}}}}]}),
+            vec![
+                ("/content/0/tool_use_id", json!("srvtoolu_5")),
+                ("/content/0/content/url", json!("https://example.com/a.txt")),
+                ("/content/0/content/content/source/type", json!("text")),
+            ],
+        ),
+    ]);
+}
+
+#[test]
+fn redact_text_editor_code_execution_result_lines() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![(
+        "anthropic text_editor_code_execution str_replace result",
+        json!({"content": [{"type": "text_editor_code_execution_tool_result",
+            "tool_use_id": "srvtoolu_6", "content": {
+            "type": "text_editor_code_execution_str_replace_result",
+            "lines": [format!("-old {s}"), format!("+new {s}")],
+            "old_start": 3, "old_lines": 1, "new_start": 3, "new_lines": 1}}]}),
+        vec![
+            ("/content/0/tool_use_id", json!("srvtoolu_6")),
+            (
+                "/content/0/content/type",
+                json!("text_editor_code_execution_str_replace_result"),
+            ),
+            ("/content/0/content/old_start", json!(3)),
+            ("/content/0/content/new_lines", json!(1)),
+        ],
+    )]);
+}
+
+#[test]
+fn redact_gemini_function_call_and_response_payloads() {
+    let s = TOOL_TEXT_SENTINEL;
+    assert_rows_redact_and_keep_structure(vec![
         (
             "gemini functionCall args",
             json!({"contents": [{"role": "model", "parts": [
@@ -995,28 +1428,7 @@ fn tool_text_cases() -> Vec<(&'static str, serde_json::Value, Vec<KeptMember>)> 
                 {"functionResponse": {"name": "lookup", "response": {"result": s}}}]}]}),
             vec![("/contents/0/parts/0/functionResponse/name", json!("lookup"))],
         ),
-    ]
-}
-
-#[test]
-fn redact_tool_call_text_across_item_kinds_keeps_structural_keys() {
-    let mut failures = Vec::new();
-    for (row, body, structural) in tool_text_cases() {
-        // Control: with redaction off the fixture surfaces the sentinel.
-        let off = redact_prompts_with_flag(&body, false).to_string();
-        assert!(off.contains(TOOL_TEXT_SENTINEL), "{row}: control");
-
-        let on = redact_prompts_with_flag(&body, true);
-        if on.to_string().contains(TOOL_TEXT_SENTINEL) {
-            failures.push(format!("{row}: leaked: {on}"));
-        }
-        for (pointer, expected) in structural {
-            if on.pointer(pointer) != Some(&expected) {
-                failures.push(format!("{row}: {pointer} != {expected}: {on}"));
-            }
-        }
-    }
-    assert!(failures.is_empty(), "{failures:#?}");
+    ]);
 }
 
 #[test]

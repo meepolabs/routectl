@@ -821,9 +821,21 @@ pub(crate) fn redact_prompts_with_flag(
 /// own a parsed value they will not reuse unredacted.
 pub(crate) fn redact_in_place(v: &mut serde_json::Value, enabled: bool) {
     if enabled {
+        redact_top_level_string_input(v);
         redact_value(v);
     } else {
         redact_reasoning_artifacts(v);
+    }
+}
+
+/// A Responses request's `input` may be the prompt as one bare string. Only
+/// the top level is matched: nested `input` keys are tool payloads with
+/// their own type-gated rules, and an item array keeps walking.
+fn redact_top_level_string_input(v: &mut serde_json::Value) {
+    if let Some(input) = v.get_mut("input")
+        && input.is_string()
+    {
+        redact_string_or_recurse(input);
     }
 }
 
@@ -1045,6 +1057,15 @@ fn redact_value(v: &mut serde_json::Value) {
             if let Some(pv) = map.get_mut("promptVariables") {
                 *pv = redacted_object();
             }
+            // OpenAI Responses `prompt.variables`: the same kind of
+            // template-variable bag, keys and values both caller-written.
+            if let Some(variables) = map
+                .get_mut("prompt")
+                .and_then(|p| p.as_object_mut())
+                .and_then(|p| p.get_mut("variables"))
+            {
+                *variables = redacted_object();
+            }
             // Anthropic `citations`: an array (or object) of citation
             // entries carrying `cited_text` + `document_title` echoed
             // from the source document -- user-derived content. Collapse
@@ -1101,18 +1122,22 @@ fn redact_value(v: &mut serde_json::Value) {
                 *client_metadata = redacted_object();
             }
             // Anthropic `document` content block: the top-level `title`
-            // leaf is the user-supplied document title. Redact REGARDLESS
-            // of length (titles are short, so the length-only `data`/`url`
+            // leaf is the user-supplied document title, and `context` is
+            // user-written text about the document. Redact REGARDLESS of
+            // length (both are short, so the length-only `data`/`url`
             // threshold would let them through). The document `source` is
             // covered by the `data`/`url` arms on recursion.
-            // An Anthropic `web_search_result` title is the found page's
-            // title, which echoes what the model searched for.
+            // A `web_search_result` or `search_result` title may carry
+            // prompt-derived or externally supplied text.
             if matches!(
                 map.get("type").and_then(|t| t.as_str()),
-                Some("document" | "web_search_result")
-            ) && let Some(title) = map.get_mut("title")
-            {
-                redact_long_string_leaf(title, 0);
+                Some("document" | "web_search_result" | "search_result")
+            ) {
+                for key in ["title", "context"] {
+                    if let Some(leaf) = map.get_mut(key) {
+                        redact_long_string_leaf(leaf, 0);
+                    }
+                }
             }
             // Bedrock inline image / document source: the `source` object
             // carries the base64 payload under a `bytes` STRING leaf
@@ -1126,6 +1151,14 @@ fn redact_value(v: &mut serde_json::Value) {
                 && let Some(bytes) = source.get_mut("bytes")
             {
                 redact_long_string_leaf(bytes, 256);
+            }
+            // An Anthropic plain-text document source carries the document
+            // text itself under `data`, so no length threshold applies.
+            if let Some(source) = map.get_mut("source").and_then(|s| s.as_object_mut())
+                && source.get("type").and_then(serde_json::Value::as_str) == Some("text")
+                && let Some(data) = source.get_mut("data")
+            {
+                redact_long_string_leaf(data, 0);
             }
 
             // Per-key sweep. Known user-content keys are redacted at
@@ -1149,9 +1182,10 @@ fn redact_value(v: &mut serde_json::Value) {
                     // audio block's `transcript` (the spoken-content
                     // transcription is user content by nature), and the
                     // `stdout` / `stderr` of an Anthropic code-execution
-                    // result.
+                    // result, and Chat-lane `reasoning_content` (the model's
+                    // reasoning on a message, response or history turn).
                     "text" | "thinking" | "instructions" | "reasoning" | "refusal"
-                    | "transcript" | "stdout" | "stderr" => {
+                    | "transcript" | "stdout" | "stderr" | "reasoning_content" => {
                         redact_string_or_recurse(entry);
                     }
                     // A tool call's arguments: a JSON-encoded string, or an
@@ -1262,10 +1296,11 @@ fn redact_value(v: &mut serde_json::Value) {
     }
 }
 
-/// Model-written text on tool-call items whose keys the per-key sweep in
-/// [`redact_value`] does not cover, keyed off the item's `type` (Responses
-/// items) or its parent key (Gemini parts, which carry no `type`). Ids,
-/// names, statuses and an action's `type` stay visible.
+/// Model- or user-written text on tool-call and other typed items whose
+/// keys the per-key sweep in [`redact_value`] does not cover, keyed off the
+/// item's `type` (Responses items, Chat tool calls and reasoning details,
+/// Anthropic result blocks) or its parent key (Gemini parts, which carry no
+/// `type`). Ids, names, statuses and an action's `type` stay visible.
 fn redact_tool_item_fields(map: &mut serde_json::Map<String, serde_json::Value>) {
     match map.get("type").and_then(serde_json::Value::as_str) {
         // The generic `input` key also names the Responses request's
@@ -1275,13 +1310,54 @@ fn redact_tool_item_fields(map: &mut serde_json::Map<String, serde_json::Value>)
                 redact_tool_payload(input);
             }
         }
-        Some("local_shell_call") => {
+        Some("local_shell_call" | "shell_call") => {
             if let Some(action) = map.get_mut("action").and_then(|a| a.as_object_mut()) {
-                redact_keys(action, &["command", "working_directory"]);
+                redact_keys(action, &["command", "commands", "working_directory"]);
                 if let Some(env) = action.get_mut("env") {
                     *env = redacted_object();
                 }
             }
+        }
+        Some("custom") => {
+            if let Some(input) = map
+                .get_mut("custom")
+                .and_then(|c| c.as_object_mut())
+                .and_then(|c| c.get_mut("input"))
+            {
+                redact_tool_payload(input);
+            }
+        }
+        Some("apply_patch_call") => {
+            if let Some(operation) = map.get_mut("operation").and_then(|o| o.as_object_mut()) {
+                redact_keys(operation, &["diff", "path"]);
+            }
+        }
+        Some("code_interpreter_call") => {
+            redact_keys(map, &["code"]);
+            if let Some(outputs) = map.get_mut("outputs").and_then(|o| o.as_array_mut()) {
+                for output in outputs.iter_mut().filter_map(|o| o.as_object_mut()) {
+                    redact_keys(output, &["logs"]);
+                }
+            }
+        }
+        Some("file_search_call") => redact_keys(map, &["queries"]),
+        // Every action field but `type` (typed text, keys, paths, ...) can
+        // be model-written, so each action collapses whole.
+        Some("computer_call") => {
+            if let Some(action) = map.get_mut("action") {
+                collapse_keeping_type(action);
+            }
+            if let Some(actions) = map.get_mut("actions").and_then(|a| a.as_array_mut()) {
+                actions.iter_mut().for_each(collapse_keeping_type);
+            }
+        }
+        Some("mcp_call") => redact_keys(map, &["error"]),
+        Some("mcp_approval_response") => redact_keys(map, &["reason"]),
+        Some("reasoning.summary") => redact_keys(map, &["summary"]),
+        Some(kind)
+            if kind.starts_with("text_editor_code_execution_") && kind.ends_with("_result") =>
+        {
+            redact_keys(map, &["lines"]);
         }
         // `url` too: an opened page's address can carry the query.
         Some("web_search_call") => {
@@ -1303,6 +1379,15 @@ fn redact_tool_item_fields(map: &mut serde_json::Map<String, serde_json::Value>)
         && let Some(response) = reply.get_mut("response")
     {
         redact_tool_payload(response);
+    }
+}
+
+/// Replace `entry` with the opaque marker, keeping its `type` member.
+fn collapse_keeping_type(entry: &mut serde_json::Value) {
+    let kind = entry.get("type").cloned();
+    *entry = redacted_object();
+    if let (Some(kind), Some(obj)) = (kind, entry.as_object_mut()) {
+        obj.insert("type".to_owned(), kind);
     }
 }
 

@@ -247,23 +247,58 @@ rather than tailing live.
 
 For sensitive environments where TRACE is needed but raw prompts are
 not OK to disk, set `ROUTECTL_LOG_REDACT_PROMPTS=1` BEFORE launching
-routectl. The redactor walks every traced body and replaces known
-prompt-bearing fields (text blocks, system, instructions, the
-`input` of `tool_use`, `server_tool_use` and `mcp_tool_use` blocks,
-function_call arguments (string or object), custom_tool_call input,
-local_shell_call `command` / `working_directory` / `env`,
-web_search_call `query` / `queries` / `pattern` / `url`,
-image_generation_call `revised_prompt` / `result`, code-execution
-`stdout` / `stderr`, web_search_result `title`, Gemini
-`functionCall.args` and `functionResponse.response`, refusal blocks,
-image source data, image_url data URIs, reasoning-replay carry blobs
-(`encrypted_content` and the `redacted_thinking` `data` blob), Bedrock
-Converse `toolUse.input` and
-`toolResult.content[*].json`) with `<redacted len=N>` placeholders
-while preserving structural fields (model, tools, sampling params,
-finish_reason, usage). Best-effort: unknown wire shapes (a new
-Anthropic content-block type, a new OpenAI Responses output kind)
-can still leak. The env var is read once on first traced body --
+routectl. The redactor walks every traced body, arrays included, and
+replaces known prompt-bearing fields while preserving structural fields
+(model, tools, sampling params, item and block `type`, `id`, `call_id`,
+`name`, `status`, an action's `type`, `role`,
+finish_reason, usage). A string leaf becomes `<redacted len=N>` (N is
+its character count). A structured tool payload (an object or array
+where a string was expected, such as object-shaped `arguments` or a
+`tool_use` `input`) and a free-form key/value bag collapse whole to
+`{"redacted": true}`, since their keys can be written by the model or
+the caller too. Any other array is walked element by element, so a
+string list under a covered key (`content`, `queries`, `commands`,
+`lines`) has each element replaced.
+
+The covered fields:
+
+- text blocks, `system`, `instructions`, refusal blocks, audio
+  `transcript`, and a Responses request's `input` when it is one bare
+  string;
+- model reasoning: thinking text, Responses reasoning `summary[*].text`,
+  Chat `reasoning` and `reasoning_content` (on `choices[].message`, on
+  an assembled stream document and on assistant history turns), and the
+  `summary` of a `reasoning_details` entry of type `reasoning.summary`;
+- tool calls: function_call `arguments` (string or object), Chat
+  `tool_calls[].custom.input` and Responses `custom_tool_call` `input`,
+  the `input` of `tool_use`, `server_tool_use` and `mcp_tool_use`
+  blocks, Bedrock Converse `toolUse.input` and
+  `toolResult.content[*].json`, and Gemini `functionCall.args` and
+  `functionResponse.response`;
+- Responses hosted-tool items: `local_shell_call` and `shell_call`
+  action `command` / `commands` / `working_directory` / `env`,
+  `apply_patch_call` operation `diff` and `path`,
+  `code_interpreter_call` `code` and `outputs[].logs`,
+  `file_search_call` `queries`, the whole `computer_call` action
+  (`action` and each of `actions`, keeping its `type`),
+  `web_search_call` action `query` / `queries` / `pattern` / `url`,
+  `image_generation_call` `revised_prompt` / `result`, `mcp_call`
+  `error`, and `mcp_approval_response` `reason`;
+- tool output: tool-result and function_call_output content,
+  code-execution `stdout` / `stderr`, and the `lines` of a
+  `text_editor_code_execution_*_result`;
+- documents and sources: a `document` block's `title` and `context`, a
+  plain-text document source's `data` at any length (including inside a
+  `web_fetch_tool_result`), the `title` of a `web_search_result` or
+  `search_result`, citations and annotations;
+- bags collapsed whole: `metadata`, `client_metadata`, Bedrock
+  `promptVariables`, and a Responses `prompt.variables`;
+- payloads: image and document source data of 256 bytes or more,
+  `file_data`, image_url data URIs, and reasoning-replay carry blobs
+  (`encrypted_content` and the `redacted_thinking` `data` blob).
+
+Best-effort: unknown wire shapes (a new Anthropic content-block type, a
+new OpenAI Responses output kind) can still leak. The env var is read once on first traced body --
 flipping it after the first trace fires has no effect; the server
 emits a one-shot `info` line at boot reporting the resolved value
 (`redact_prompts=true|false`) so operators can confirm the setting
