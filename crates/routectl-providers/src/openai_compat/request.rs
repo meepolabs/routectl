@@ -22,7 +22,9 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use routectl_core::wire_check::{EditKind, EditSite, EgressKind, WireTap};
-use routectl_core::{ChatRequest, Error, Message, Result, ToolDef, sanitize_for_log};
+use routectl_core::{
+    ChatRequest, Error, Message, RequestProvenance, Result, ToolDef, sanitize_for_log,
+};
 
 use super::HistoryReasoning;
 use super::dialect::ReasoningDialect;
@@ -66,6 +68,10 @@ const STRIPPED_TOP_LEVEL_KEYS: [(&str, EditSite); 4] = [
     ("anthropic_beta", EditSite::AnthropicBetaStrip),
 ];
 
+/// Canonical top-level key holding the client's end-user id. The Anthropic
+/// ingress fills it from `metadata.user_id`.
+const CLIENT_USER_KEY: &str = "user";
+
 /// Translate a canonical [`ChatRequest`] into an openai-compat wire body,
 /// applying the reasoning dialect, history-reasoning policy, and merged
 /// payload extras.
@@ -75,6 +81,34 @@ pub fn normalize(
     dialect: ReasoningDialect,
     history_reasoning: HistoryReasoning,
     payload_extras: Option<&Value>,
+) -> Result<Value> {
+    normalize_for_upstream(
+        id,
+        req,
+        dialect,
+        history_reasoning,
+        payload_extras,
+        Upstream::OutsideAws,
+    )
+}
+
+/// Who receives the body. AWS (the Bedrock mantle lane) never receives the
+/// Anthropic client's identity, `user` included; whether any other host
+/// should is not settled, so it keeps today's body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Upstream {
+    Aws,
+    OutsideAws,
+}
+
+/// [`normalize`] for a known upstream.
+pub(super) fn normalize_for_upstream(
+    id: &str,
+    req: &ChatRequest,
+    dialect: ReasoningDialect,
+    history_reasoning: HistoryReasoning,
+    payload_extras: Option<&Value>,
+    upstream: Upstream,
 ) -> Result<Value> {
     let _observation = crate::translation_drop_metrics::ObservationScope::enter(req);
     // The one point every openai-compat egress request passes exactly
@@ -95,6 +129,7 @@ pub fn normalize(
     let mut fingerprint = ClientFingerprintStripTally::default();
     let system = project_system(id, req, &mut fingerprint);
     let client_extras = select_client_extras(id, req, &mut fingerprint);
+    let withholds_user = withholds_client_user(id, req, upstream, &mut fingerprint);
     flush_fingerprint_tally(&fingerprint);
 
     // Seams the OpenAI-compat wire can't represent: Anthropic-only
@@ -128,6 +163,14 @@ pub fn normalize(
     // Dialects that need `chat_template_kwargs` re-inject it themselves.
     obj.remove("system");
     obj.remove("provider_extras");
+    if withholds_user && obj.remove(CLIENT_USER_KEY).is_some() {
+        declare_member(
+            tap,
+            EditSite::ClientFingerprintStrip,
+            CLIENT_USER_KEY,
+            EditKind::Remove,
+        );
+    }
     let stripped: Vec<(&str, EditSite)> = STRIPPED_TOP_LEVEL_KEYS
         .into_iter()
         .filter(|(key, _)| obj.remove(*key).is_some())
@@ -304,6 +347,29 @@ fn project_system(
         messages,
         system_withheld,
     }
+}
+
+/// True when the canonical `user` stays off this wire: it holds the Anthropic
+/// client's `metadata.user_id`, and the upstream is AWS. A Chat client's own
+/// `user`, and every upstream outside AWS, keep it.
+fn withholds_client_user(
+    id: &str,
+    req: &ChatRequest,
+    upstream: Upstream,
+    fingerprint: &mut ClientFingerprintStripTally,
+) -> bool {
+    let withheld = upstream == Upstream::Aws
+        && req.user.is_some()
+        && req.routectl_internal.provenance == RequestProvenance::AnthropicIngress;
+    // TRANSLATION-DROP: policy-action class=client_fingerprint_stripped test=an_anthropic_ingress_user_alone_is_withheld_on_the_mantle_lane_and_counted_once
+    if withheld {
+        fingerprint.record();
+        debug!(
+            provider = id,
+            "openai-compat egress: client user id dropped for an AWS upstream",
+        );
+    }
+    withheld
 }
 
 /// Count this request's fingerprint withhold, if any, once.

@@ -451,6 +451,7 @@ const EXPECTED_RESOLVED_LOG_COUNTS: &[(&str, &str, usize)] = &[
     ("openai_compat/request.rs", "merge_extras", 2),
     ("openai_compat/request.rs", "project_system", 2),
     ("openai_compat/request.rs", "select_client_extras", 2),
+    ("openai_compat/request.rs", "withholds_client_user", 1),
     ("openai_compat/wire_lift/mod.rs", "drop_unrepresentable", 1),
     (
         "openai_compat/wire_lift/response_format.rs",

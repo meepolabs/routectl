@@ -369,12 +369,18 @@ impl Provider for OpenAiCompatProvider {
     fn normalize_request(&self, req: &ChatRequest) -> Result<Value> {
         let dialect = self.dialect_for(req);
         let history = self.history_reasoning_for(req);
-        let body = request::normalize(
+        let upstream = if self.is_mantle() {
+            request::Upstream::Aws
+        } else {
+            request::Upstream::OutsideAws
+        };
+        let body = request::normalize_for_upstream(
             &self.cfg.id,
             req,
             dialect,
             history,
             self.cfg.payload_extras.as_ref(),
+            upstream,
         )?;
         #[cfg(feature = "bedrock")]
         self.refuse_unforwardable_mantle_media(&body)?;
@@ -2104,6 +2110,10 @@ mod wire_tap_tests;
 #[cfg(test)]
 #[path = "chat_shape_wire_tests.rs"]
 mod chat_shape_wire_tests;
+
+#[cfg(all(test, feature = "bedrock"))]
+#[path = "mantle_identity_tests.rs"]
+mod mantle_identity_tests;
 
 #[cfg(all(test, feature = "bedrock"))]
 mod mantle_header_tests {

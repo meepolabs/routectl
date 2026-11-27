@@ -1269,14 +1269,24 @@ and `output_config` and the Converse body fields `inferenceConfig`,
 `toolConfig` and `additionalModelResponseFieldPaths`.
 
 The client's `metadata` block (its `user_id` / `account_uuid`) never
-reaches AWS on Bedrock Invoke, Bedrock Converse, or the
-[Bedrock mantle Anthropic lane](#bedrock-mantle-anthropic-lane).
-The operator's own `metadata` is sent in its place: the provider or
-model `payload_extras` value. Of that value,
+reaches AWS on Bedrock Invoke, Bedrock Converse, the
+[Bedrock mantle Anthropic lane](#bedrock-mantle-anthropic-lane), or the
+mantle `openai-chat` lane of the
+[Bedrock mantle OpenAI lanes](#bedrock-mantle-openai-lanes).
+On the first three the operator's own `metadata` is sent in its place:
+the provider or model `payload_extras` value. Of that value,
 only what the request still carries when it is sent ships: a member a
 retry removed or reverted stays out. On Converse a request whose
 client `metadata` differs from that operator value counts once as the
 `client_fingerprint_stripped` policy action.
+
+On the mantle `openai-chat` lane the client's `metadata` is withheld as on
+any `openai-compat` upstream (see the dialect rule for client extras), and
+the top-level `user` that an Anthropic Messages client's
+`metadata.user_id` fills is withheld too. Either withhold, or both, counts
+once per request as the `client_fingerprint_stripped` policy action. A
+Chat Completions client's own `user` is still sent, and an
+`openai-compat` upstream outside AWS still receives `user`.
 
 A field the account's
 Bedrock schema has not caught up with is answered with a 400 naming it

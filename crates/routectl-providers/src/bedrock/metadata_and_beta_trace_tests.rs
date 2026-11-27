@@ -1,5 +1,5 @@
-//! Every Bedrock surface (Invoke, Converse, and the mantle Anthropic lane)
-//! withholds the client's `metadata` block and ships the operator's own
+//! Every Bedrock surface (Invoke, Converse, and the mantle Anthropic and
+//! openai-compat lanes) withholds the client's `metadata` block and ships the operator's own
 //! value in its place, and each Bedrock seam traces the `anthropic_beta` set
 //! it ships once per request.
 
@@ -205,9 +205,31 @@ enum Surface {
     Invoke,
     Converse,
     MantleAnthropic,
+    MantleOpenaiCompat,
 }
 
-const SURFACES: [Surface; 3] = [Surface::Invoke, Surface::Converse, Surface::MantleAnthropic];
+const SURFACES: [Surface; 4] = [
+    Surface::Invoke,
+    Surface::Converse,
+    Surface::MantleAnthropic,
+    Surface::MantleOpenaiCompat,
+];
+
+fn mantle_openai_compat() -> crate::openai_compat::OpenAiCompatProvider {
+    crate::openai_compat::OpenAiCompatProvider::new(crate::openai_compat::OpenAiCompatConfig {
+        mantle: Some(crate::mantle::MantleAuth {
+            region: "us-west-2".into(),
+            creds: super::auth::ResolvedCreds::Bearer {
+                key: "mantle-bearer-key".into(),
+            },
+        }),
+        ..crate::openai_compat::OpenAiCompatConfig::new(
+            "bedrock-mantle-compat",
+            "https://bedrock-mantle.us-west-2.api.aws/openai/v1",
+            "first-party-key",
+        )
+    })
+}
 
 /// The body `surface` ships.
 fn normalize_on(surface: Surface, req: &ChatRequest) -> Value {
@@ -226,22 +248,33 @@ fn normalize_on(surface: Surface, req: &ChatRequest) -> Value {
             )
             .expect("assembles");
         }
+        Surface::MantleOpenaiCompat => {
+            return routectl_core::Provider::normalize_request(&mantle_openai_compat(), req)
+                .expect("assembles");
+        }
     };
     normalize(&cfg(shape), req)
 }
 
 fn shipped_metadata_on(surface: Surface, body: &Value) -> Option<Value> {
     match surface {
-        Surface::Invoke | Surface::MantleAnthropic => body.get("metadata").cloned(),
+        Surface::Invoke | Surface::MantleAnthropic | Surface::MantleOpenaiCompat => {
+            body.get("metadata").cloned()
+        }
         Surface::Converse => shipped_metadata(BedrockApiShape::Converse, body),
     }
 }
 
 /// An Anthropic-ingress request as an attempt reaches the egress: `merged`
 /// is the attempt's `provider_extras` after every dispatch-time merge, strip
-/// and revert, and `operator` the operator layer the router recorded.
+/// and revert, and `operator` the operator layer the router recorded. As the
+/// ingress does, the canonical `user` mirrors a string `metadata.user_id`.
 fn attempt(merged: Value, operator: Option<Value>) -> ChatRequest {
     let mut req = request();
+    req.user = merged
+        .pointer("/metadata/user_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     req.provider_extras = Some(merged);
     req.routectl_internal.operator_payload_extras = operator.map(Arc::new);
     req.routectl_internal.provenance = RequestProvenance::AnthropicIngress;
@@ -344,7 +377,10 @@ fn only_operator_metadata_the_attempt_still_carries_reaches_any_bedrock_surface(
             let want = row.want.clone();
             let got = shipped_metadata_on(surface, &body);
             let serialized = body.to_string();
-            if got != want {
+            // openai-compat forwards the operator's recorded `metadata` whole
+            // rather than the members the attempt still carries, so only the
+            // absence check below is its contract here.
+            if surface != Surface::MantleOpenaiCompat && got != want {
                 failures.push(format!("{surface:?} / {}: shipped {got:?}", row.name));
             }
             if serialized.contains(CLIENT_MARK) || serialized.contains("user_id") {
@@ -379,10 +415,29 @@ fn metadata_strip_edits_on(surface: Surface, mut req: ChatRequest) -> Vec<(EditK
         .edits(Leg::Request)
         .iter()
         .filter(|e| {
-            e.site() == EditSite::ClientFingerprintStrip && e.path().starts_with("/metadata")
+            e.site() == EditSite::ClientFingerprintStrip
+                && (e.path().starts_with("/metadata") || e.path() == "/user")
         })
         .map(|e| (e.kind(), e.path().to_string()))
         .collect()
+}
+
+/// The fingerprint removals `surface` declares for a row whose Anthropic
+/// surfaces declare `metadata_paths`. openai-compat declares its `metadata`
+/// withhold under the managed-extras site instead, and the canonical `user`
+/// the ingress mirrored from `metadata.user_id` at `/user`.
+fn declared_fingerprint_paths(
+    surface: Surface,
+    merged: &Value,
+    metadata_paths: &[&'static str],
+) -> Vec<&'static str> {
+    match surface {
+        Surface::MantleOpenaiCompat => merged
+            .pointer("/metadata/user_id")
+            .map(|_| vec!["/user"])
+            .unwrap_or_default(),
+        _ => metadata_paths.to_vec(),
+    }
 }
 
 #[test]
@@ -417,7 +472,7 @@ fn each_withheld_client_member_is_declared_at_its_depth_on_every_surface() {
         for (name, merged, operator, want) in &rows {
             let edits = metadata_strip_edits_on(surface, attempt(merged.clone(), operator.clone()));
 
-            let want: Vec<(EditKind, String)> = want
+            let want: Vec<(EditKind, String)> = declared_fingerprint_paths(surface, merged, want)
                 .iter()
                 .map(|p| (EditKind::Remove, (*p).to_string()))
                 .collect();

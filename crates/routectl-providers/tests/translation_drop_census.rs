@@ -99,7 +99,7 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
     ("gemini/mod.rs", 1),
     ("gemini/request.rs", 23),
     ("gemini/schema.rs", 7),
-    ("openai_compat/request.rs", 15),
+    ("openai_compat/request.rs", 16),
     ("openai_compat/wire_lift/content.rs", 6),
     ("openai_compat/wire_lift/response_format.rs", 4),
     ("openai_compat/wire_lift/thinking.rs", 3),
@@ -122,7 +122,7 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
 /// Population per verdict shape. A cheap review signal on bulk retagging: a
 /// counted arm relabelled `structural` keeps the per-file total unchanged.
 const EXPECTED_LANE_MARKERS: usize = 104;
-const EXPECTED_POLICY_ACTION_MARKERS: usize = 25;
+const EXPECTED_POLICY_ACTION_MARKERS: usize = 26;
 const EXPECTED_STRUCTURAL_MARKERS: usize = 52;
 
 /// The `fidelity-risk` register: a same-dialect-reachable candidate, which is
