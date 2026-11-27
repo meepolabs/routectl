@@ -236,7 +236,7 @@ banner, no retry signal -- silently mislabeled data.
   dialed).`, not as the large "Every check passed" card.
 - On a healthy daemon the head reads `Needs attention` with a green dot and a
   faint `0` and nothing under it; the full "Every check passed" card shows.
-- The reachability line reads `Routes, from real traffic since the daemon
+- The reachability line reads `Lanes, from real traffic since the daemon
   started (Doctor sends no test requests): ...`. Right after a restart every
   route reads `not used yet`; a route whose request succeeds moves
   to `reachable`. This line and the one-line checks all-clear are set in
@@ -451,7 +451,9 @@ banner, no retry signal -- silently mislabeled data.
   together, never through the hint; a sorted header's `^` or `v` sits inside
   its ring the same way. On a numeric column (Traffic REQUESTS, COST, ...)
   the mark sits before the label, and the label ends on the same right edge
-  as the figures under it, at rest, focused and sorted.
+  as the figures under it, at rest, focused and sorted. The space between
+  the mark and the label is the same for the `^v` hint as for a sorted
+  `^` or `v`, at default text and at 200% text.
 
 ## UI review cases
 

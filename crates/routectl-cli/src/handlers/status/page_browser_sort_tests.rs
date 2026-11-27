@@ -400,6 +400,29 @@ fn page_browser_the_focus_ring_encloses_the_sort_hint() {
 /// rounding between a text range's box and a cell's.
 const ALIGN_SLACK: f64 = 1.0;
 
+/// In every state of the numeric scenario the header's label ends on the
+/// right edge its figures share and the header keeps its resting width.
+fn assert_numeric_label_on_figures_edge(setup: &str, out: &Value) {
+    for at in ["rest", "focused", "pressed", "pressed_focused"] {
+        let o = &out[at];
+        assert_eq!(o["header_num"], true, "{setup} {at}: premise: {out:#}");
+        let figures = o["figure_rights"].as_array().expect("figure edges");
+        assert!(!figures.is_empty(), "{setup} {at}: no figures: {out:#}");
+        let label = o["label_right"].as_f64().expect("label end");
+        for figure in figures {
+            let figure = figure.as_f64().expect("a figure edge");
+            assert!(
+                (label - figure).abs() <= ALIGN_SLACK,
+                "{setup} {at}: the label ends at {label}, its figures at {figure}: {out:#}"
+            );
+        }
+        assert_eq!(
+            o["header_width"], out["rest"]["header_width"],
+            "{setup} {at}: the header changed width: {out:#}"
+        );
+    }
+}
+
 /// A right-aligned (numeric) sortable header, Traffic REQUESTS, ends its
 /// label on the right edge its figures share, at rest, keyboard-focused,
 /// sorted, and sorted and focused, at 720, 1024 and 1440 px; its hint and
@@ -408,8 +431,8 @@ const ALIGN_SLACK: f64 = 1.0;
 ///
 /// Mutation checks: put the trailing `--sort-mark-room` padding back on
 /// `th.num .sort-btn` -> red (the label ends short of its figures); drop
-/// `th.num .sort-btn::after { left: 0; }` -> red (the mark lands over the
-/// label or past the ring).
+/// the `th.num .sort-btn::after` rule -> red (the mark lands over the
+/// label).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_a_numeric_sort_header_ends_on_its_figures_edge() {
@@ -426,24 +449,7 @@ fn page_browser_a_numeric_sort_header_ends_on_its_figures_edge() {
             "{out:#}"
         );
 
-        for at in ["rest", "focused", "pressed", "pressed_focused"] {
-            let o = &out[at];
-            assert_eq!(o["header_num"], true, "{width} {at}: premise: {out:#}");
-            let figures = o["figure_rights"].as_array().expect("figure edges");
-            assert!(!figures.is_empty(), "{width} {at}: no figures: {out:#}");
-            let label = o["label_right"].as_f64().expect("label end");
-            for figure in figures {
-                let figure = figure.as_f64().expect("a figure edge");
-                assert!(
-                    (label - figure).abs() <= ALIGN_SLACK,
-                    "{width} {at}: the label ends at {label}, its figures at {figure}: {out:#}"
-                );
-            }
-            assert_eq!(
-                o["header_width"], out["rest"]["header_width"],
-                "{width} {at}: the header changed width: {out:#}"
-            );
-        }
+        assert_numeric_label_on_figures_edge(&width.to_string(), &out);
         for at in ["focused", "pressed_focused"] {
             assert_mark_inside_ring(&format!("{width} {at}"), &out[at], &out);
         }
@@ -455,6 +461,65 @@ fn page_browser_a_numeric_sort_header_ends_on_its_figures_edge() {
         );
         assert_eq!(out["pressed"]["content"], "\" ^\"", "{width}: {out:#}");
     }
+}
+
+/// How far apart two drawn gaps may be and still read as one: a pixel.
+const GAP_SLACK: f64 = 1.0;
+
+/// The space between a right-aligned header's mark and its label: from the
+/// right edge of the drawn mark to the start of the label's text.
+fn mark_to_label_gap(o: &Value) -> f64 {
+    o["label_left"].as_f64().expect("label start") - edge(o, "mark", "right")
+}
+
+/// On a right-aligned (numeric) sortable header, Traffic REQUESTS at 1440 px,
+/// the neutral hint shown on keyboard focus sits as far from the label as
+/// the sorted mark does, at rest and focused, at the default text size and
+/// with the text doubled; the label still ends on its figures' edge and the
+/// header keeps one width. Positive control: the page ran at the setup's
+/// root font size, and both marks are drawn clear of the label.
+///
+/// Mutation check: anchor `th.num .sort-btn::after` by its left edge again
+/// (`left: 0`, no `right`) -> red at both sizes (the wider hint sits closer
+/// to the label than the sorted mark).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_a_numeric_sort_header_keeps_one_mark_gap() {
+    let mut gaps = Vec::new();
+    for font_px in [16_u32, 32] {
+        let preferences =
+            serde_json::json!({ "webkit": { "webprefs": { "default_font_size": font_px } } });
+        let out = browser::run_scenario_in_profile(
+            &sort_scenario("sort-hint-box-numeric", "traffic"),
+            &["--window-size=1440,900"],
+            &preferences,
+        )
+        .result;
+        let at = format!("1440 px, {font_px} px text");
+        assert_eq!(out["inner_width"].as_u64(), Some(1440), "{at}: {out:#}");
+        assert_eq!(
+            out["root_font_px"].as_f64(),
+            Some(f64::from(font_px)),
+            "{at}: {out:#}"
+        );
+        for state in ["focused", "pressed_focused"] {
+            assert_mark_inside_ring(&format!("{at} {state}"), &out[state], &out);
+        }
+        assert_numeric_label_on_figures_edge(&at, &out);
+
+        let hint = mark_to_label_gap(&out["focused"]);
+        for state in ["pressed", "pressed_focused"] {
+            gaps.push((at.clone(), state, hint, mark_to_label_gap(&out[state])));
+        }
+    }
+    let uneven: Vec<_> = gaps
+        .iter()
+        .filter(|(_, _, hint, sorted)| (hint - sorted).abs() > GAP_SLACK)
+        .collect();
+    assert!(
+        uneven.is_empty(),
+        "(setup, sorted state, hint gap px, sorted gap px) that differ: {uneven:?}"
+    );
 }
 
 // ---- source check: the sort registry and the sortable columns ---------------

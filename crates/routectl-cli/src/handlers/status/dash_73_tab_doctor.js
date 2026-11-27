@@ -124,7 +124,7 @@
   // neither credit nor debit a route. A route stays `unknown` until a request
   // ends in success or in a failure that counts against its circuit, so a
   // route that only ever saw a 400 still reads "not used yet".
-  var REACH_LEAD = 'Routes, from real traffic since the daemon started (Doctor sends no test requests): ';
+  var REACH_LEAD = 'Lanes, from real traffic since the daemon started (Doctor sends no test requests): ';
 
   function doctorReach(reachability) {
     var line = markRefreshUnit(document.createElement('p'), 'reach');

@@ -198,7 +198,7 @@ fn reach(state_key: &str, verdict: &str) -> Value {
     json!({ "state_key": state_key, "reachability": verdict })
 }
 
-/// The reachability line says what it reports in words: routes, read from
+/// The reachability line says what it reports in words: lanes, read from
 /// real traffic, with no test request sent. The `unknown` verdict reads "not
 /// used yet" while `reachable` and `degraded`, which have no other word,
 /// read as themselves, in the line's fixed order with each count. A verdict
@@ -231,14 +231,14 @@ fn page_browser_doctor_reachability_line_reads_in_plain_words() {
 
     assert_eq!(
         out["line"],
-        "Routes, from real traffic since the daemon started (Doctor sends no test \
+        "Lanes, from real traffic since the daemon started (Doctor sends no test \
          requests): 1 reachable, 1 degraded, 2 not used yet",
         "{out:#}"
     );
     assert_prose_font(&out);
     assert_eq!(out["after_error"], true, "{out:#}");
     let after = out["after"].as_str().expect("section text");
-    assert!(!after.contains("Routes, from real traffic"), "{out:#}");
+    assert!(!after.contains("from real traffic"), "{out:#}");
 }
 
 fn warn(detail: &str, remediation: &str) -> Value {

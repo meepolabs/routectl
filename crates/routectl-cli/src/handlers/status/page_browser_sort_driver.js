@@ -290,7 +290,11 @@
       return document.getElementById(id) &&
         document.querySelectorAll('#traffic-groups tbody tr.exp-row').length > 0;
     }).then(function () {
-      var out = { inner_width: window.innerWidth, rest: geometry() };
+      var out = {
+        inner_width: window.innerWidth,
+        root_font_px: parseFloat(getComputedStyle(document.documentElement).fontSize),
+        rest: geometry()
+      };
       btn().focus();
       out.focused = geometry();
       btn().blur();

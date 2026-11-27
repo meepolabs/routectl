@@ -54,9 +54,13 @@ td.wrap {
    the focus ring encloses the mark and a header never changes width when a
    mark appears. A text header keeps that room after its label; a
    right-aligned (numeric) header keeps it, and draws its mark, before its
-   label, so the label ends on the right edge its figures share. */
+   label, so the label ends on the right edge its figures share. That mark is
+   placed by its right edge: the hint and the sorted mark differ in width, and
+   the leading space in their content collapses, so only a right anchor keeps
+   one gap before the label. */
 .sort-btn {
   --sort-mark-room: 1.6em;
+  --sort-mark-gap: 0.25em;
   position: relative;
   font: inherit;
   color: inherit;
@@ -85,7 +89,10 @@ th:not([aria-sort]) .sort-btn:focus-visible::after {
 th[aria-sort="ascending"] .sort-btn::after { content: " ^"; }
 th[aria-sort="descending"] .sort-btn::after { content: " v"; }
 th.num .sort-btn { padding: 0 0 0 var(--sort-mark-room); }
-th.num .sort-btn::after { left: 0; }
+th.num .sort-btn::after {
+  left: auto;
+  right: calc(100% - var(--sort-mark-room) + var(--sort-mark-gap));
+}
 
 /* ---- expandable rows ---- */
 .exp-cell { width: 1.6rem; text-align: center; }
