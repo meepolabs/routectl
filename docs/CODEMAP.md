@@ -7761,7 +7761,10 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   windowless dimming, and the tab bar
 - `src/handlers/status/dash_components.css` -- dashboard STYLE part 2 of 3: the
   shared component vocabulary. Tables that scroll inside their card
-  (`.tablewrap`) so the page never scrolls sideways from 720px up,
+  (`.tablewrap`) so the page never scrolls sideways from 720px up, sortable
+  headers (`.sort-btn` reserves `--sort-mark-room` for its mark inside its own
+  padding, after a text label and before a numeric `th.num` one, so a header
+  never changes width and a numeric label ends on its figures' edge),
   cards, badges, the `.tok` value-domain token families (mirrored by the label
   maps in `dash_10_format.js` -- a new token is a paired edit in both),
   figures, notes, and the Now view's needs-attention list and accounts-at-a-
@@ -7873,7 +7876,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   the severity, sentence and view target of a current `attention` payload's
   `verdict` via `currentVerdict`; else, through `shownVerdict`, the last one
   shown with its time and why it is not current, "the daemon cannot be
-  reached" whenever `lastRefreshFailed`; "Checking routing state" only before
+  reached" whenever `lastRefreshFailed`, or "overloaded" / "timed out" when
+  `refreshFailureNote` reads that from `aggregateFailureKind`, the transport
+  kind `markTransport` last recorded; "Checking routing state" only before
   any verdict, with that note after a failed refresh; the view link via
   `syncVerdictLink`, omitted for the view already open), the poll
   indicator, and the tab badges (`sourceBadge`; the models badge counts rows
@@ -7896,13 +7901,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (a same-page link to a view through the `open-view` action, class
   `view-link`), the shared login
   color rule (`loginKind`, `poolsWithUsableLogin`), `copyableCode` (a focusable
-  `<code>` whose Ctrl+A selects its text alone), and the SVG
+  `<code>` whose Ctrl+A selects its text alone), `srOnlyText` (a
+  screen-reader-only span), and the SVG
   sparkline family (`sparkSvg` + `drawSegments`, which draws a sparse series as
   breaks). Data-age figures use the as_of of their own record (`panelNowMs`)
 - `src/handlers/status/dash_55_attention.js` -- dashboard SCRIPT part 8 of
   16: the shared needs-attention renderer. `attentionSection(rec, idPrefix)`
   (source `attention`) draws the daemon's list as sent: its broken / degraded
-  counts, a clear line when nothing is active, then each item (severity,
+  counts, a clear line when nothing is active, then each item, all through
+  `attentionSectionWith(rec, idPrefix, head, lead)`, the section shell a view
+  may head its own way (Doctor's tally head). Each item (severity,
   subject, cause, a link to its target view, the fix as a focusable
   `copyableCode` or a remediation in words, the raw token) as its own refresh
   unit with id `<prefix>-attention-<key>`, recovered items grey with their
@@ -7914,8 +7922,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   view reads live here (`PARTIAL_COST_NOTE` "priced subtotal only",
   `API_PRICE_NOTE`, `EQUIVALENT_PARTIAL_TITLE`, `EQUIVALENT_UNPRICED_TITLE`,
   `PARTIAL_UNPRICED_TITLE`), so a partial dollar figure never reads as the
-  total, as do the timing populations (`TTFT_POPULATION`,
-  `LATENCY_POPULATION`) and `costMark`, the visible `partial` word with its
+  total, as do `TTFT_POPULATION` (Traffic holds `LATENCY_POPULATION`) and
+  `costMark`, the visible `partial` word with its
   reason in a title and `sr-only` text, wrapped (`cost-mark-wrap`) after a
   hidden space so the accessible name keeps it apart from the figure.
   `accountsGlanceSection`
@@ -7948,7 +7956,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   only repaints the scope strip). Renders the scope strip and the group-by
   picker outside the section boundary, then one sortable expandable table
   (`traffic-groups`) with a row per group with requests in the range:
-  requests, error rate, TTFT and latency p50, cost, "At API prices" and cache
+  requests, error rate, TTFT and latency p50 (latency over every request,
+  `LATENCY_POPULATION`), cost, "At API prices" and cache
   hit (`cacheHitText`), a partial cost or API-price figure carrying its
   subtotal mark. An opened row (its pairs marked `traffic-pairs`, each value
   beside its label) shows the p90/p99 tails, errors by class,
@@ -7992,15 +8001,19 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   lanes no nickname of which carried a request fold into the
   `models-unused` disclosure, and nothing folds while that read is not live.
   Refusal and capability chips read in plain words (`modelsChipText`), the
-  raw tokens leading their tooltips.
+  raw tokens leading their tooltips; an empty chip list and an unmeasured
+  transit draw `modelsAbsent`, a faint dash with its word kept for a screen
+  reader.
   Transit reads "N of M responses changed" or "unmeasured"; each nickname
   links to Traffic scoped to the lane's entry and that model
 - `src/handlers/status/dash_72_tab_config.js` -- dashboard SCRIPT part 13 of
   16: the Config tab, single-source (`config`) and FAILS CLOSED for the WHOLE
   tab -- the payload is validated in one place before any section is built, so
   a version mismatch or a malformed panel never partially renders config
-  vocabulary. Renders a source strip (config path, load age, resolved
-  alias/provider counts, listen address, version) above the reference tables
+  vocabulary. Renders a source strip (the config path on a row of its own,
+  `configPathFact`, cut by `pathPieces` into pieces that each end at a path
+  separator so it wraps only after one and copies exactly; then load age,
+  resolved alias/provider counts, listen address, version) above the reference tables
   for aliases + their ordered chains, models + their facts (window, output
   fill and prices with sources, in a detail row),
   the configured ROUTING providers (id / kind / configured endpoint origin /
@@ -8009,8 +8022,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   before any coercion so an explicit `0` reads "0 RPM", `null` reads
   "not set here", and an absent field reads "unknown"),
   the seat pools (`poolSection`, table `config-pools`: each pool's seat
-  selection as written and its members in configured order, named through
-  `seatName`, "no login label" where none; a payload without `pools` names no
+  selection as written and its members under a `members` head, named through
+  `seatName`, "no login label" where none; only a `fill-first` pool's list is
+  ordered and notes "tried in the order listed"; a payload without `pools` names no
   pool), credential activation (a footnote naming it the FIXED routectl-owned OAuth
   candidate universe rather than a slice of the routing set the strip counts),
   the capability overrides (default-closed disclosure),
@@ -8018,9 +8032,11 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   breaker debit (the wire's `debits_breaker`) / source
 - `src/handlers/status/dash_73_tab_doctor.js` -- dashboard SCRIPT part 14 of
   16: the Doctor view's sections, on three sources. `doctorAttentionSection`
-  (source `attention`) is one headline card with the daemon's active tally
-  (broken + degraded, the number the tab badge shows) over the shared
-  `attentionSection` under the `doctor` prefix. `doctorModelProblemsSection`
+  (source `attention`) is the shared `attentionSectionWith` under the `doctor`
+  prefix, headed by `doctorAttentionHead`: the daemon's active tally (broken +
+  degraded, the number the tab badge shows) beside a dot in its worst
+  severity's color, the head alone saying when nothing is active.
+  `doctorModelProblemsSection`
   (source `models`) counts the Models view's cause groups (`modelsCauseGroups`)
   with the problem lanes from `modelProblemLanes` beside it and a link to that
   view. `buildDoctor` (source `doctor`) FAILS CLOSED as a whole --
@@ -8028,11 +8044,16 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `Pass|Warn|Fail` triad and every reachability verdict against
   `reachable|degraded|unknown` before any part is built, so an unknown token
   replaces the section instead of being interpreted. It renders the
-  reachability rollup line (`doctorReach`), one card per failing/warning
+  reachability rollup line (`doctorReach`: `REACH_LEAD`, which says the counts
+  come from real traffic since the daemon started and Doctor sends no test
+  requests, then each verdict's count in `REACH_WORDS`' plainer word, so
+  `unknown` reads "not used yet"), one card per failing/warning
   finding (severity pill, name, section, detail, and the remediation only when
   the finding carries one), and the passing checks behind a default-closed
   `buildExpander`; a report with findings but none needing attention reads as
-  a welcoming all-clear, and a report with no check at all says so rather than
+  a welcoming all-clear, shrunk to the one quiet `doctorChecksLine` while
+  `attentionAllClear` says the needs-attention list is active, and a report
+  with no check at all says so rather than
   claiming health. Below the checks: a capability-writes card (the three
   counters, never summed). The report's structured panels (the capability
   matrix, the steady-state trim panel) ride the payload for the CLI and draw
@@ -8804,18 +8825,24 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   regardless of expiry. `run` takes the chosen config path only to name it in
   the rerun; it never reads or writes config. `refresh_with` runs against an
   already-open store; a failure only a fresh login cures appends the exact
-  `routectl login` rerun for the same seat (built with `commands::rerun`)
+  `routectl login` rerun for the same seat (`rerun::seat_login_command`)
 - `src/commands/whoami.rs` -- `routectl whoami` -- prints OAuth seat state
   grouped by provider (default seat as `<provider> (default)`, labeled seats
   as `<provider>#<label>`), each with its own expiry; exits 0 when at least
-  one seat is logged in, 2 otherwise
+  one seat is logged in, 2 otherwise. `run` takes the chosen config path only
+  so an expired seat's login hint (`commands::rerun::seat_login_hint`) names
+  that seat's `--label` and a non-default `--config`
 - `src/commands/rerun.rs` -- the literal rerun command a failure message
   prints: `RerunCommand` builds `routectl [--config <path>] ...` word by
   word, each operator-written value one exact shell word, and voids the
   whole command when a value has no exact printable form (control
   character, non-UTF-8 path); `chosen_config_path` leaves the default file
-  unnamed; `instruction` falls back to "re-run the same `...` command".
-  Used by `login`, `refresh`, `provider add --login` and `init`
+  unnamed; `instruction` falls back to "re-run the same `...` command";
+  `seat_login_command` builds `routectl [--config <path>] login <provider>
+  [--label <name>]` for one stored seat and `seat_login_hint` wraps it as "run `...` <purpose>", or a
+  sentence naming no command when it has no exact printable form.
+  Used by `login`, `refresh`, `whoami`, doctor's auth section, `provider add
+  --login` and `init`
 - `src/commands/seat.rs` -- shared `--label` handling for the seat-aware
   OAuth commands: `validate_label` (rejects empty/whitespace labels,
   mirroring the `oauth://` ref parser) and `shell_word` (one POSIX shell
@@ -9245,7 +9272,8 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   config folder, absent when none is, auth (no seats/expired -> WARN, store-open error ->
   FAIL, plus the served gather's parked and unusable seat findings; a login
   remediation names `oauth_login_command`, `--label` and shell-quoting
-  included), pools
+  included; an expired seat's names `rerun::seat_login_hint` for that seat
+  and the context's `login_config`), pools
   (`section_seat_pools` + `pool_finding`: one finding per `[pools.<name>]`
   block from `seat_report::describe_pool` -- Warn naming a member with no
   stored credential, Fail when no member has one, so this section CAN move the
