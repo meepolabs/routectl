@@ -73,8 +73,8 @@
   function sourceStrip(source) {
     var strip = document.createElement('div');
     strip.className = 'cfgstrip';
+    strip.appendChild(configPathFact(source.config_path));
     [
-      ['config file', source.config_path || 'none (not loaded from a file)'],
       ['loaded', loadedAge(source.loaded_age_ms)],
       ['resolved', countText(source.alias_count, ' alias', ' aliases') + ', ' +
         countText(source.provider_count, ' provider', ' providers')],
@@ -85,18 +85,69 @@
   }
 
   function cfgFact(label, value) {
+    var v = document.createElement('span');
+    v.textContent = (value === null || value === undefined || value === '') ? '-' : String(value);
+    v.title = v.textContent;
+    return factRow(label, v);
+  }
+
+  function factRow(label, valueNode) {
     var wrap = document.createElement('div');
     wrap.className = 'cfgfact';
     var l = document.createElement('span');
     l.className = 'cfgfact-label';
     l.textContent = label;
-    var v = document.createElement('span');
-    v.className = 'cfgfact-value';
-    v.textContent = (value === null || value === undefined || value === '') ? '-' : String(value);
-    v.title = v.textContent;
+    valueNode.classList.add('cfgfact-value');
     wrap.appendChild(l);
-    wrap.appendChild(v);
+    wrap.appendChild(valueNode);
     return wrap;
+  }
+
+  // The path is copied, so it is never cut: it takes a row of its own and
+  // breaks only after a slash. Each piece ends at a slash and is drawn
+  // unbreakable unless it alone is wider than the row; the pieces are text
+  // in one element, so a selection copies the path exactly.
+  function configPathFact(path) {
+    var v = document.createElement('span');
+    if (typeof path === 'string' && path !== '') {
+      pathPieces(path).forEach(function (piece, i) {
+        if (i > 0) { v.appendChild(document.createElement('wbr')); }
+        var span = document.createElement('span');
+        span.className = 'cfgpath-piece';
+        span.textContent = piece;
+        v.appendChild(span);
+      });
+    } else {
+      v.textContent = 'none (not loaded from a file)';
+    }
+    var fact = factRow('config file', v);
+    fact.classList.add('cfgfact--path');
+    return fact;
+  }
+
+  // Built from its char code: page.rs rejects a quoted literal starting
+  // with a slash.
+  var PATH_SLASH = String.fromCharCode(47);
+
+  // `path` cut after each slash that ends a named segment, so a run of
+  // slashes (the root's included) stays with the segment after it.
+  function pathPieces(path) {
+    var pieces = [];
+    var piece = '';
+    var named = false;
+    for (var i = 0; i < path.length; i++) {
+      var ch = path.charAt(i);
+      piece += ch;
+      if (ch !== PATH_SLASH) {
+        named = true;
+      } else if (named) {
+        pieces.push(piece);
+        piece = '';
+        named = false;
+      }
+    }
+    if (piece !== '') { pieces.push(piece); }
+    return pieces;
   }
 
   // A load that was never stamped reads as unknown rather than as an age of
@@ -241,21 +292,41 @@
   // ---- config: the seat pools ------------------------------------------
 
   // One row per `[pools.X]` entry: the selection strategy as the config
-  // spells it, and the members in configured order (fill-first drains them in
-  // that order). A member is named as every other view names a seat, "entry
-  // (label)"; the account key is never parsed for either.
+  // spells it, and the members in configured order. Only fill-first tries
+  // them in that order, so only its list is ordered and says so;
+  // sticky-least-loaded places by session and pace and walks that order only
+  // as its fall-back, so its list does not announce positions. A member is
+  // named as every other view names a seat, "entry (label)"; the account key
+  // is never parsed for either.
   function poolSection(pools) {
     var tbl = mkTable('config-pools', 'Configured seat pools',
-      [R('pool'), C('seat selection'), W('members, in order')]);
+      [R('pool'), C('seat selection'), W('members')]);
     pools.forEach(function (p) {
-      trow(tbl, [p.pool, p.seat_selection, poolMembers(p.members)]);
+      trow(tbl, [p.pool, p.seat_selection, poolMembersCell(p)]);
     });
     return card('Pools', 'which provider entries share a pool, and how a request picks one',
       tableScroll(tbl));
   }
 
-  function poolMembers(members) {
-    var list = document.createElement('ol');
+  // The wire's `seat_selection` token for the one strategy that drains its
+  // members in the order the config lists them.
+  var FILL_FIRST_SELECTION = 'fill-first';
+
+  function poolMembersCell(pool) {
+    var ordered = pool.seat_selection === FILL_FIRST_SELECTION;
+    var cell = document.createDocumentFragment();
+    cell.appendChild(poolMembers(pool.members, ordered));
+    if (ordered) {
+      var note = document.createElement('span');
+      note.className = 'cfgpool-order';
+      note.textContent = 'tried in the order listed';
+      cell.appendChild(note);
+    }
+    return cell;
+  }
+
+  function poolMembers(members, ordered) {
+    var list = document.createElement(ordered ? 'ol' : 'ul');
     list.className = 'cfgpool-members';
     (Array.isArray(members) ? members : []).forEach(function (m) {
       var item = document.createElement('li');

@@ -258,6 +258,53 @@ fn page_browser_the_outage_strip_keeps_the_sentence_whole_at_double_text_size() 
     );
 }
 
+fn run_config_path(width: u32) -> Value {
+    let scenario = browser::Scenario {
+        name: "layout-config-path",
+        hash: "config",
+        snippets: &[LAYOUT_DRIVER],
+        budget_ms: LAYOUT_BUDGET_MS,
+    };
+    let window = format!("--window-size={width},900");
+    browser::run_scenario_with(&scenario, &[&window]).result
+}
+
+/// A config path longer than its row, at 720, 1024 and 1440 px: it sits on
+/// a strip row of its own, moves to a new line only right after a slash,
+/// is cut nowhere (no overflow, nothing past the strip, the page does not
+/// scroll sideways), carries no title, and both its text and a selection of
+/// it are the served path exactly. Positive control: the path does wrap at
+/// every width, so the slash rule was exercised.
+///
+/// Mutation checks: drop `display: inline-block` from `.cfgpath-piece` ->
+/// red (a line breaks inside a segment); drop `grid-column` from
+/// `.cfgfact--path` -> red (the path shares its row).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_config_path_wraps_only_at_a_slash_and_is_never_cut() {
+    for width in [720, 1024, 1440] {
+        let out = run_config_path(width);
+        let at = format!("at {width} px");
+        assert_eq!(out["inner_width"].as_u64(), Some(u64::from(width)), "{at}");
+        assert_eq!(out["text"], out["wire"], "{at}: {out:#}");
+        assert_eq!(out["selected"], out["wire"], "{at}: {out:#}");
+        assert_eq!(out["title"], Value::Null, "{at}: {out:#}");
+        assert!(
+            out["lines"].as_u64().unwrap_or(0) > 1,
+            "{at}: premise, the path wraps: {out:#}"
+        );
+        let inside_segment: Vec<&Value> = list(&out, "breaks")
+            .iter()
+            .filter(|b| !b.as_str().is_some_and(|b| b.starts_with("/|")))
+            .collect();
+        assert_eq!(inside_segment, Vec::<&Value>::new(), "{at}: {out:#}");
+        assert_eq!(out["cut"], false, "{at}: {out:#}");
+        assert_eq!(out["right_inside_strip"], true, "{at}: {out:#}");
+        assert_eq!(out["row_to_itself"], true, "{at}: {out:#}");
+        assert_eq!(out["page_scrolls_sideways"], false, "{at}: {out:#}");
+    }
+}
+
 /// The audit is not blind: over planted boxes beside the view it flags a
 /// numeral cut by an ellipsis, one clipped without, one pushed past the
 /// window's edge, a scroller the keyboard cannot reach (once as a bare box,

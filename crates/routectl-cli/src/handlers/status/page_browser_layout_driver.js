@@ -362,6 +362,99 @@
     });
   });
 
+  // ---- the config path at the row's width ---------------------------------
+
+  // Longer than one row at 1440 px, with named segments of many lengths.
+  var LONG_CONFIG_PATH = '/home/operator-with-a-long-account-name/.config/routectl/' +
+    'profiles/a-rather-long-profile-directory-name/nested/another-level-of-folders/' +
+    'with-some-more-depth/and-a-segment-that-is-quite-long-on-its-own/x/' +
+    'the-last-folder-before-the-file/one-more/and-again-one-more/config.toml';
+
+  // Each character of `el`'s text with the top of the line it is drawn on.
+  function charTops(el) {
+    var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    var out = [];
+    var range = document.createRange();
+    for (var node = walker.nextNode(); node; node = walker.nextNode()) {
+      for (var i = 0; i < node.data.length; i++) {
+        range.setStart(node, i);
+        range.setEnd(node, i + 1);
+        var r = range.getBoundingClientRect();
+        out.push({ ch: node.data.charAt(i), top: Math.round(r.top) });
+      }
+    }
+    return out;
+  }
+
+  // Every place the text moves to a new line, as the characters either side.
+  function lineBreaks(chars) {
+    var breaks = [];
+    for (var i = 1; i < chars.length; i++) {
+      if (chars[i].top > chars[i - 1].top + SLACK_PX) {
+        breaks.push(chars[i - 1].ch + '|' + chars[i].ch);
+      }
+    }
+    return breaks;
+  }
+
+  function factValue(strip, label) {
+    var found = null;
+    Array.prototype.forEach.call(strip.querySelectorAll('.cfgfact'), function (f) {
+      if (f.querySelector('.cfgfact-label').textContent === label) {
+        found = f.querySelector('.cfgfact-value');
+      }
+    });
+    if (!found) { throw new Error('no strip fact ' + label); }
+    return found;
+  }
+
+  d.scenario('layout-config-path', function () {
+    d.rewrite(function (url, text) {
+      if (url.pathname !== '/status') { return text; }
+      var agg = JSON.parse(text);
+      agg.panels.config.data.source.config_path = LONG_CONFIG_PATH;
+      return JSON.stringify(agg);
+    });
+    return d.waitUntil('the long path', function () {
+      var strip = document.querySelector('#body-config .cfgstrip');
+      return strip && factValue(strip, 'config file').textContent === LONG_CONFIG_PATH && strip;
+    }).then(function (strip) {
+      var value = factValue(strip, 'config file');
+      var fact = value.closest('.cfgfact');
+      var range = document.createRange();
+      range.selectNodeContents(value);
+      var selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      var selected = selection.toString();
+      selection.removeAllRanges();
+      var chars = charTops(value);
+      var lines = {};
+      chars.forEach(function (c) { lines[c.top] = true; });
+      var others = Array.prototype.filter.call(strip.querySelectorAll('.cfgfact'),
+        function (f) { return f !== fact; });
+      return {
+        inner_width: window.innerWidth,
+        wire: LONG_CONFIG_PATH,
+        text: value.textContent,
+        selected: selected,
+        title: value.getAttribute('title'),
+        lines: Object.keys(lines).length,
+        breaks: lineBreaks(chars),
+        cut: value.scrollWidth > value.clientWidth + SLACK_PX,
+        right_inside_strip: value.getBoundingClientRect().right <=
+          strip.getBoundingClientRect().right + SLACK_PX,
+        row_to_itself: others.every(function (f) {
+          var a = f.getBoundingClientRect();
+          var b = fact.getBoundingClientRect();
+          return a.top >= b.bottom - SLACK_PX || a.bottom <= b.top + SLACK_PX;
+        }),
+        page_scrolls_sideways:
+          document.documentElement.scrollWidth > document.documentElement.clientWidth
+      };
+    });
+  });
+
   d.scenario('layout-check', function () {
     var view = addressView();
     var marker = SETTLED_MARKER[view];

@@ -610,9 +610,10 @@ fn page_browser_config_pools_card_names_members_as_entry_and_label() {
     let report = run_scenario(&scenario("config-pools", "config"));
 
     let rows = report.result["rows"].as_array().expect("pool rows");
-    assert_eq!(rows.len(), 1, "{rows:#?}");
-    let pool = &rows[0];
-    assert_eq!(pool["pool"], FIXTURE_POOL);
+    let pool = rows
+        .iter()
+        .find(|r| r["pool"] == FIXTURE_POOL)
+        .unwrap_or_else(|| panic!("the fixture pool: {rows:#?}"));
     assert_eq!(pool["seat_selection"], "fill-first");
     let members = pool["members"].as_array().expect("members");
     let names: Vec<&str> = members
@@ -630,6 +631,61 @@ fn page_browser_config_pools_card_names_members_as_entry_and_label() {
     assert_eq!(members[0]["login_faint"], true);
     assert_eq!(members[1]["login"], Value::Null, "{:#}", members[1]);
     assert_eq!(members[1]["copied"], names[1], "{:#}", members[1]);
+}
+
+/// The members column reads "Members" for every pool, and only the
+/// fill-first pool says its members are tried in the order listed: once, in
+/// the faint ink the column heads use, under an ordered list. The sticky-least-loaded pool (the same
+/// members under another key) carries no such line and lists them unordered.
+///
+/// Mutation checks: add the order note for every strategy in
+/// poolMembersCell -> red (the sticky pool says it); restore the head
+/// `members, in order` -> red.
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_config_pools_say_the_order_only_for_fill_first() {
+    let report = run_scenario(&scenario("config-pools", "config"));
+
+    let heads = report.result["heads"].as_array().expect("heads");
+    assert_eq!(
+        heads.last().expect("a members head"),
+        "MEMBERS",
+        "{heads:?}"
+    );
+    let rows = report.result["rows"].as_array().expect("pool rows");
+    let by_selection = |selection: &str| {
+        rows.iter()
+            .find(|r| r["seat_selection"] == selection)
+            .unwrap_or_else(|| panic!("a {selection} pool: {rows:#?}"))
+    };
+    let fill = by_selection("fill-first");
+    let spread_selection = report.result["spread_selection"]
+        .as_str()
+        .expect("the planted strategy");
+    let spread = by_selection(spread_selection);
+
+    assert_eq!(fill["list_tag"], "ol", "{fill:#}");
+    assert_eq!(fill["order_note"], "tried in the order listed", "{fill:#}");
+    assert_eq!(
+        fill["cell_text"]
+            .as_str()
+            .expect("cell text")
+            .matches("order listed")
+            .count(),
+        1,
+        "{fill:#}"
+    );
+    assert_eq!(
+        fill["order_note_color"], report.result["head_color"],
+        "the note is drawn in the faint ink of a column head: {fill:#}"
+    );
+    assert_eq!(spread["list_tag"], "ul", "{spread:#}");
+    assert_eq!(spread["order_note"], Value::Null, "{spread:#}");
+    assert_eq!(
+        spread["members"].as_array().map(Vec::len),
+        fill["members"].as_array().map(Vec::len),
+        "positive control: the same members drawn: {spread:#}"
+    );
 }
 
 /// The priced fixture model's detail row at `width`: the pairs as drawn.

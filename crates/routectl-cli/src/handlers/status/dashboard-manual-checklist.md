@@ -170,6 +170,15 @@ banner, no retry signal -- silently mislabeled data.
   card IS present. Each operator-authored surface added to this tab has to
   join that card's suppression condition, or the tab tells an operator their
   configuration is not in effect while displaying it.
+- Config's version strip gives the config file its own row. Serve a config
+  from a deeply nested folder (a path longer than the strip at 720 px): at
+  720, 1024 and 1440 px the path wraps only right after a `/`, never inside
+  a folder name, nothing is cut or hidden behind a tooltip, and selecting
+  the value and pasting it gives the path exactly. Served with no config
+  file the row reads `none (not loaded from a file)`.
+- Config's Pools table heads the members column `Members`. Serve one
+  `fill-first` pool and one `sticky-least-loaded` pool: only the fill-first
+  row ends its members with a faint `tried in the order listed`.
 - Config's model detail row names where each fact comes from. Serve a config
   with one `anthropic-api` model carrying `context_window`, a
   `[models.X.pricing] output_per_mtok`, and no `max_output_tokens`, plus an

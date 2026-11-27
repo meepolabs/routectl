@@ -243,6 +243,23 @@
   color: var(--muted);
   overflow-wrap: anywhere;
 }
+/* The config path is copied, so it is never cut: it takes the whole row and
+   breaks only between its pieces (each ends at a slash). A piece is an
+   inline box no wider than the row, so it moves to the next line whole and
+   breaks inside itself only when it alone is wider than the row; that keeps
+   the page from scrolling sideways. */
+.cfgfact--path {
+  grid-column: 1 / -1;
+}
+.cfgfact--path .cfgfact-value {
+  overflow-wrap: normal;
+  word-break: keep-all;
+}
+.cfgpath-piece {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
 
 /* ---- config: model facts ----
    A price label keeps the config's spelling of a cache lifetime (30m):
@@ -263,7 +280,9 @@
 
 /* ---- config: seat pools ----
    Members read in configured order, one per line, each named "entry
-   (label)" in monospace; an unlabeled entry carries a quieter note. */
+   (label)" in monospace; an unlabeled entry carries a quieter note, and a
+   fill-first pool's list ends with a faint line saying the order is the
+   order tried. */
 .cfgpool-members {
   list-style: none;
   margin: 0;
@@ -289,6 +308,12 @@
   font-size: var(--fs-xs);
   color: var(--muted);
   overflow-wrap: anywhere;
+}
+.cfgpool-order {
+  display: block;
+  margin-top: var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--faint);
 }
 
 /* ---- doctor: headline card, findings, collapsed passes ----

@@ -392,14 +392,43 @@
     };
   }
 
+  // A second pool beside the served fill-first one: the same row under
+  // another key and the other strategy, so one table holds both.
+  var SPREAD_POOL = 'spread-pool';
+  var SPREAD_SELECTION = 'sticky-least-loaded';
+
   d.scenario('config-pools', function () {
-    return d.waitForElement('config-pools').then(function (tbl) {
+    d.rewrite(function (url, text) {
+      if (url.pathname !== '/status') { return text; }
+      var agg = JSON.parse(text);
+      var pools = agg.panels.config.data.pools;
+      var spread = JSON.parse(JSON.stringify(pools[0]));
+      spread.pool = SPREAD_POOL;
+      spread.seat_selection = SPREAD_SELECTION;
+      pools.push(spread);
+      return JSON.stringify(agg);
+    });
+    return d.waitUntil('both pools', function () {
+      var tbl = document.getElementById('config-pools');
+      return tbl && tbl.querySelectorAll('tbody > tr').length === 2 && tbl;
+    }).then(function (tbl) {
       return {
+        spread_selection: SPREAD_SELECTION,
+        head_color: getComputedStyle(tbl.querySelector('thead th')).color,
+        heads: Array.prototype.map.call(tbl.querySelectorAll('thead th'), function (th) {
+          return th.innerText;
+        }),
         rows: Array.prototype.map.call(tbl.querySelectorAll('tbody > tr'), function (tr) {
           var cells = tr.children;
+          var list = cells[2].querySelector('.cfgpool-members');
+          var note = cells[2].querySelector('.cfgpool-order');
           return {
             pool: cells[0].innerText,
             seat_selection: cells[1].innerText,
+            list_tag: list ? list.tagName.toLowerCase() : null,
+            order_note: note ? note.innerText : null,
+            order_note_color: note ? getComputedStyle(note).color : null,
+            cell_text: cells[2].innerText,
             members: Array.prototype.map.call(
               cells[2].querySelectorAll('.cfgpool-member'), function (li) {
                 var login = li.querySelector('.cfgpool-login');
