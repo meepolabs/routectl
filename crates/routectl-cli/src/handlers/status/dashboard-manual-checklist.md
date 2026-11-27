@@ -239,7 +239,8 @@ banner, no retry signal -- silently mislabeled data.
 - The reachability line reads `Routes, from real traffic since the daemon
   started (Doctor sends no test requests): ...`. Right after a restart every
   route reads `not used yet`; a route whose request succeeds moves
-  to `reachable`.
+  to `reachable`. This line and the one-line checks all-clear are set in
+  the page's sans text font, not monospace.
 
 ### Capability writes
 
@@ -448,7 +449,9 @@ banner, no retry signal -- silently mislabeled data.
   `^v` while hovered or Tab-focused, without the column shifting. Tab to an
   unsorted header: the focus ring goes round the label and the `^v` hint
   together, never through the hint; a sorted header's `^` or `v` sits inside
-  its ring the same way.
+  its ring the same way. On a numeric column (Traffic REQUESTS, COST, ...)
+  the mark sits before the label, and the label ends on the same right edge
+  as the figures under it, at rest, focused and sorted.
 
 ## UI review cases
 

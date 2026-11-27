@@ -224,10 +224,9 @@
 
   // A header button's box, the box its focus ring is drawn around (the
   // button grown by the outline's offset and width), where its label's text
-  // ends, and the box of the mark after the label, from the mark's used
-  // position and size.
-  function markGeometry(column) {
-    var btn = headerButton(column);
+  // starts and ends, and the box of the mark beside the label, from the
+  // mark's used position and size.
+  function markGeometry(btn) {
     var b = btn.getBoundingClientRect();
     var cs = getComputedStyle(btn);
     var ring = parseFloat(cs.outlineOffset) + parseFloat(cs.outlineWidth);
@@ -235,8 +234,10 @@
     var left = b.left + parseFloat(after.left);
     var label = document.createRange();
     label.selectNodeContents(btn);
+    var text = label.getBoundingClientRect();
     return {
-      label_right: label.getBoundingClientRect().right,
+      label_left: text.left,
+      label_right: text.right,
       content: after.content,
       button: { left: b.left, right: b.right, width: b.width },
       ring: { left: b.left - ring, right: b.right + ring, style: cs.outlineStyle },
@@ -250,14 +251,58 @@
   // header pressed (its own mark) with focus.
   d.scenario('sort-hint-box', function () {
     return waitForTable().then(function () {
-      var out = { rest: markGeometry('provider') };
+      var out = { rest: markGeometry(headerButton('provider')) };
       headerButton('provider').focus();
-      out.focused = markGeometry('provider');
+      out.focused = markGeometry(headerButton('provider'));
       headerButton('provider').blur();
       headerButton('provider').click();
       headerButton('provider').focus();
-      out.pressed_focused = markGeometry('provider');
+      out.pressed_focused = markGeometry(headerButton('provider'));
       return out;
+    });
+  });
+
+  // Where each figure of the column under `th` ends: the right edge of its
+  // drawn text in every body row.
+  function figureRights(th) {
+    var col = Array.prototype.indexOf.call(th.parentNode.children, th);
+    var table = th.closest('table');
+    return Array.prototype.map.call(table.querySelectorAll('tbody tr.exp-row'), function (tr) {
+      var range = document.createRange();
+      range.selectNodeContents(tr.children[col]);
+      return range.getBoundingClientRect().right;
+    });
+  }
+
+  // The Traffic table's right-aligned REQUESTS header beside its figures:
+  // at rest, keyboard-focused, then sorted (by a click) at rest and focused.
+  d.scenario('sort-hint-box-numeric', function () {
+    var id = 'traffic-groups-sort-krequests';
+    function btn() { return byId(id); }
+    function geometry() {
+      var out = markGeometry(btn());
+      var th = btn().closest('th');
+      out.header_num = th.classList.contains('num');
+      out.figure_rights = figureRights(th);
+      return out;
+    }
+    return d.waitUntil('the traffic table', function () {
+      return document.getElementById(id) &&
+        document.querySelectorAll('#traffic-groups tbody tr.exp-row').length > 0;
+    }).then(function () {
+      var out = { inner_width: window.innerWidth, rest: geometry() };
+      btn().focus();
+      out.focused = geometry();
+      btn().blur();
+      btn().click();
+      return d.waitUntil('the sorted header', function () {
+        return btn().closest('th').getAttribute('aria-sort') === 'ascending';
+      }).then(function () {
+        out.pressed = geometry();
+        btn().focus();
+        out.pressed_focused = geometry();
+        return out;
+      });
     });
   });
 

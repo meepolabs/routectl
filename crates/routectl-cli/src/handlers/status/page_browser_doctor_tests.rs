@@ -148,8 +148,11 @@ fn page_browser_doctor_lists_now_items_under_its_own_ids_and_heads_them_with_the
 /// is back and the line is gone. The passing checks stay behind their
 /// disclosure in both states.
 ///
-/// Mutation check: drop the doctorChecksLine return from doctorAllClear
-/// (always draw the card) -> red (the active case draws the card).
+/// The line is prose, so it is set in the page's UI sans, not monospace.
+///
+/// Mutation checks: drop the doctorChecksLine return from doctorAllClear
+/// (always draw the card) -> red (the active case draws the card); drop the
+/// `font-family` from `.docreach, .docchecks` -> red (the line is mono).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_doctor_shrinks_the_checks_all_clear_while_anything_needs_attention() {
@@ -165,6 +168,7 @@ fn page_browser_doctor_shrinks_the_checks_all_clear_while_anything_needs_attenti
         active["line"], "Doctor's own checks: none reported a problem (no upstream was dialed).",
         "{out:#}"
     );
+    assert_prose_font(active);
     assert_eq!(active["cards"], json!([]), "{out:#}");
     assert_eq!(active["passes"], "1 check passed", "{out:#}");
 
@@ -179,6 +183,17 @@ fn page_browser_doctor_shrinks_the_checks_all_clear_while_anything_needs_attenti
     assert_eq!(healthy["passes"], "1 check passed", "{out:#}");
 }
 
+/// A Doctor prose line computes to the page's UI font family, which is a
+/// sans stack and not the monospace one.
+fn assert_prose_font(report: &Value) {
+    let ui = report["ui_font"].as_str().expect("the page's UI font");
+    assert!(
+        ui.contains("sans-serif") && !ui.contains("monospace"),
+        "premise: the body font is the UI sans: {report:#}"
+    );
+    assert_eq!(report["line_font"], ui, "{report:#}");
+}
+
 fn reach(state_key: &str, verdict: &str) -> Value {
     json!({ "state_key": state_key, "reachability": verdict })
 }
@@ -188,12 +203,15 @@ fn reach(state_key: &str, verdict: &str) -> Value {
 /// used yet" while `reachable` and `degraded`, which have no other word,
 /// read as themselves, in the line's fixed order with each count. A verdict
 /// this build does not know is not dropped from the count: the doctor
-/// section stops drawing and says it could not read the payload.
+/// section stops drawing and says it could not read the payload. The line is
+/// prose, so it is set in the page's UI sans, not monospace.
 ///
 /// Mutation checks: drop the `unknown` entry from REACH_WORDS -> red (the
 /// line reads "2 unknown"); make reachWord return '' for a token with no
 /// word -> red (reachable and degraded lose their word); let validatedReport
-/// accept any reachability token -> red (the unknown verdict is drawn past).
+/// accept any reachability token -> red (the unknown verdict is drawn past);
+/// drop the `font-family` from `.docreach, .docchecks` -> red (the line is
+/// mono).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_doctor_reachability_line_reads_in_plain_words() {
@@ -217,6 +235,7 @@ fn page_browser_doctor_reachability_line_reads_in_plain_words() {
          requests): 1 reachable, 1 degraded, 2 not used yet",
         "{out:#}"
     );
+    assert_prose_font(&out);
     assert_eq!(out["after_error"], true, "{out:#}");
     let after = out["after"].as_str().expect("section text");
     assert!(!after.contains("Routes, from real traffic"), "{out:#}");

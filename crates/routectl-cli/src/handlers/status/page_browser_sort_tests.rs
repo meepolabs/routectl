@@ -327,6 +327,33 @@ fn edge(report: &Value, part: &str, side: &str) -> f64 {
         .unwrap_or_else(|| panic!("no {part}.{side}: {report:#}"))
 }
 
+/// A mark drawn beside a header's label and inside its focus ring: clear of
+/// the label (after it on a left-aligned header, before it on a right-aligned
+/// one), clear of the ring's 2px stroke on both sides, and of non-zero width.
+fn assert_mark_inside_ring(at: &str, o: &Value, out: &Value) {
+    assert_eq!(o["focus_visible"], true, "{at}: {out:#}");
+    assert_eq!(o["ring"]["style"], "solid", "{at}: {out:#}");
+    assert!(
+        edge(o, "mark", "width") > 0.0,
+        "{at}: no mark drawn: {out:#}"
+    );
+    let label_left = o["label_left"].as_f64().expect("label start");
+    let label_right = o["label_right"].as_f64().expect("label end");
+    assert!(
+        edge(o, "mark", "left") >= label_right - SUBPIXEL
+            || edge(o, "mark", "right") <= label_left + SUBPIXEL,
+        "{at}: the mark is drawn over the label: {out:#}"
+    );
+    assert!(
+        edge(o, "mark", "right") <= edge(o, "ring", "right") - 2.0,
+        "{at}: the mark is drawn past the focus ring: {out:#}"
+    );
+    assert!(
+        edge(o, "mark", "left") >= edge(o, "ring", "left") + 2.0,
+        "{at}: the mark is drawn before the focus ring: {out:#}"
+    );
+}
+
 /// The neutral hint on a keyboard-focused unpressed header draws after its
 /// label and inside its focus ring, clear of the ring's 2px stroke, and so
 /// does a pressed header's own mark; the header is as wide with the hint
@@ -346,19 +373,10 @@ fn page_browser_the_focus_ring_encloses_the_sort_hint() {
 
     for at in ["focused", "pressed_focused"] {
         let o = &out[at];
-        assert_eq!(o["focus_visible"], true, "{at}: {out:#}");
-        assert_eq!(o["ring"]["style"], "solid", "{at}: {out:#}");
-        assert!(
-            edge(o, "mark", "width") > 0.0,
-            "{at}: no mark drawn: {out:#}"
-        );
+        assert_mark_inside_ring(at, o, &out);
         assert!(
             edge(o, "mark", "left") >= o["label_right"].as_f64().expect("label edge") - SUBPIXEL,
-            "{at}: the mark is drawn over the label: {out:#}"
-        );
-        assert!(
-            edge(o, "mark", "right") <= edge(o, "ring", "right") - 2.0,
-            "{at}: the mark is drawn past the focus ring: {out:#}"
+            "{at}: a left-aligned header draws its mark after the label: {out:#}"
         );
     }
     assert_eq!(
@@ -376,6 +394,67 @@ fn page_browser_the_focus_ring_encloses_the_sort_hint() {
         out["rest"]["button"]["width"], out["focused"]["button"]["width"],
         "{out:#}"
     );
+}
+
+/// How far a header label's right edge may sit from its figures': the
+/// rounding between a text range's box and a cell's.
+const ALIGN_SLACK: f64 = 1.0;
+
+/// A right-aligned (numeric) sortable header, Traffic REQUESTS, ends its
+/// label on the right edge its figures share, at rest, keyboard-focused,
+/// sorted, and sorted and focused, at 720, 1024 and 1440 px; its hint and
+/// sorted mark sit inside its focus ring, and the header keeps one width
+/// through all four states.
+///
+/// Mutation checks: put the trailing `--sort-mark-room` padding back on
+/// `th.num .sort-btn` -> red (the label ends short of its figures); drop
+/// `th.num .sort-btn::after { left: 0; }` -> red (the mark lands over the
+/// label or past the ring).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_a_numeric_sort_header_ends_on_its_figures_edge() {
+    for width in [720_u32, 1024, 1440] {
+        let window = format!("--window-size={width},900");
+        let out = browser::run_scenario_with(
+            &sort_scenario("sort-hint-box-numeric", "traffic"),
+            &[&window],
+        )
+        .result;
+        assert_eq!(
+            out["inner_width"].as_u64(),
+            Some(u64::from(width)),
+            "{out:#}"
+        );
+
+        for at in ["rest", "focused", "pressed", "pressed_focused"] {
+            let o = &out[at];
+            assert_eq!(o["header_num"], true, "{width} {at}: premise: {out:#}");
+            let figures = o["figure_rights"].as_array().expect("figure edges");
+            assert!(!figures.is_empty(), "{width} {at}: no figures: {out:#}");
+            let label = o["label_right"].as_f64().expect("label end");
+            for figure in figures {
+                let figure = figure.as_f64().expect("a figure edge");
+                assert!(
+                    (label - figure).abs() <= ALIGN_SLACK,
+                    "{width} {at}: the label ends at {label}, its figures at {figure}: {out:#}"
+                );
+            }
+            assert_eq!(
+                o["header_width"], out["rest"]["header_width"],
+                "{width} {at}: the header changed width: {out:#}"
+            );
+        }
+        for at in ["focused", "pressed_focused"] {
+            assert_mark_inside_ring(&format!("{width} {at}"), &out[at], &out);
+        }
+        assert_eq!(out["rest"]["content"], "none", "{width}: {out:#}");
+        assert_eq!(
+            out["focused"]["content"],
+            Value::from("\" ^v\" / \"\""),
+            "{width}: {out:#}"
+        );
+        assert_eq!(out["pressed"]["content"], "\" ^\"", "{width}: {out:#}");
+    }
 }
 
 // ---- source check: the sort registry and the sortable columns ---------------

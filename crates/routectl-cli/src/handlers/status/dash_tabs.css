@@ -347,7 +347,10 @@ td > .hchips { max-width: 24rem; }
   color: var(--faint);
   overflow-wrap: anywhere;
 }
-.docreach, .docchecks { margin: 0; }
+.docreach, .docchecks {
+  margin: 0;
+  font-family: var(--font-ui);
+}
 .docattn-count {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;

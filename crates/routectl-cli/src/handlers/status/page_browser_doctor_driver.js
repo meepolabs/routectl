@@ -143,6 +143,8 @@
       return {
         badge: doctorHead().badge,
         line: line ? line.textContent : null,
+        line_font: line ? getComputedStyle(line).fontFamily : null,
+        ui_font: getComputedStyle(document.body).fontFamily,
         cards: Array.prototype.map.call(doctor.querySelectorAll('.card.empty .empty-title'),
           function (n) { return n.textContent; }),
         findings: doctor.querySelectorAll('.docfinding').length,
@@ -180,6 +182,8 @@
       return document.querySelector('#body-doctor .docreach');
     }).then(function (line) {
       out.line = line.textContent;
+      out.line_font = getComputedStyle(line).fontFamily;
+      out.ui_font = getComputedStyle(document.body).fontFamily;
       state.list = row.next;
       return d.waitUntil('the doctor section after an unknown verdict', function () {
         return !document.querySelector('#body-doctor .docreach');
