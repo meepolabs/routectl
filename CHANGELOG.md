@@ -488,7 +488,7 @@ list with more narrative.
 
 - **The dashboard Doctor "Every check passed" card gives way while anything needs attention.** When every doctor check passed but the attention list has an active item, the card is replaced by one line in the page's text font, `Doctor's own checks: none reported a problem (no upstream was dialed).`; with nothing needing attention the full card is shown as before.
 
-- **The dashboard Doctor reachability line says what it reports.** It reads `Lanes, from real traffic since the daemon started (Doctor sends no test requests): ...` with a count per verdict, and a route with no settled request yet reads `not used yet` instead of `unknown`, set in the page's text font rather than monospace. The `/status/doctor` `reachability` tokens are unchanged.
+- **The dashboard Doctor reachability line says what it reports.** It reads `Lanes, from real traffic since the daemon started (Doctor sends no test requests): ...` with a count per verdict, and a lane with no settled request yet reads `not used yet` instead of `unknown`, set in the page's text font rather than monospace. The `/status/doctor` `reachability` tokens are unchanged.
 
 - **The dashboard's status line names why a refresh failed.** When the aggregate answers `503` the note beside the last verdict reads `as of <time> - the daemon is overloaded`, and when the request times out it reads `as of <time> - the status request timed out`; only a daemon that gives no answer reads `the daemon cannot be reached`, as before. The note follows the latest failure, so an outage after an overload reads `the daemon cannot be reached`. The same wording appears beside "Checking routing state" before any verdict has landed. The "status overloaded" and "timed out" banners stay.
 

@@ -208,12 +208,9 @@ enum Surface {
     MantleOpenaiCompat,
 }
 
-const SURFACES: [Surface; 4] = [
-    Surface::Invoke,
-    Surface::Converse,
-    Surface::MantleAnthropic,
-    Surface::MantleOpenaiCompat,
-];
+/// The surfaces that send the Anthropic body shape and its `metadata` block.
+const ANTHROPIC_SHAPED: [Surface; 3] =
+    [Surface::Invoke, Surface::Converse, Surface::MantleAnthropic];
 
 fn mantle_openai_compat() -> crate::openai_compat::OpenAiCompatProvider {
     crate::openai_compat::OpenAiCompatProvider::new(crate::openai_compat::OpenAiCompatConfig {
@@ -288,15 +285,21 @@ struct MetadataRow {
     name: &'static str,
     merged: Value,
     payload: Option<Value>,
+    /// What an Anthropic-shaped surface ships: the operator members the
+    /// attempt still carries.
     want: Option<Value>,
+    /// What openai-compat ships: the operator's recorded value whole, for a
+    /// key the attempt still carries.
+    openai_compat_want: Option<Value>,
 }
 
 fn metadata_rows() -> Vec<MetadataRow> {
-    let row = |name, merged, payload, want| MetadataRow {
+    let row = |name, merged, payload, want, openai_compat_want| MetadataRow {
         name,
         merged,
         payload,
         want,
+        openai_compat_want,
     };
     vec![
         row(
@@ -304,10 +307,12 @@ fn metadata_rows() -> Vec<MetadataRow> {
             json!({"metadata": {"user_id": "u-client-1", "trace": "op-trace"}}),
             Some(json!({"metadata": {"trace": "op-trace"}})),
             Some(json!({"trace": "op-trace"})),
+            Some(json!({"trace": "op-trace"})),
         ),
         row(
             "client object alone",
             json!({"metadata": {"user_id": "u-client-1", "account_uuid": "u-client-2"}}),
+            None,
             None,
             None,
         ),
@@ -316,12 +321,14 @@ fn metadata_rows() -> Vec<MetadataRow> {
             json!({"metadata": "op-tag"}),
             Some(json!({"metadata": "op-tag"})),
             Some(json!("op-tag")),
+            Some(json!("op-tag")),
         ),
         row(
             "operator scalar, the slot holds the client's object",
             json!({"metadata": {"user_id": "u-client-1"}}),
             Some(json!({"metadata": "op-tag"})),
             None,
+            Some(json!("op-tag")),
         ),
         row(
             "nested members: only the operator's nested member ships",
@@ -331,11 +338,13 @@ fn metadata_rows() -> Vec<MetadataRow> {
             }}),
             Some(json!({"metadata": {"tags": {"env": "prod"}}})),
             Some(json!({"tags": {"env": "prod"}})),
+            Some(json!({"tags": {"env": "prod"}})),
         ),
         row(
             "operator empty object",
             json!({"metadata": {"user_id": "u-client-1"}}),
             Some(json!({"metadata": {}})),
+            Some(json!({})),
             Some(json!({})),
         ),
         row(
@@ -343,44 +352,44 @@ fn metadata_rows() -> Vec<MetadataRow> {
             json!({"metadata": {"user_id": "u-client-1"}}),
             Some(json!({"metadata": {"trace": "op-trace"}})),
             None,
+            Some(json!({"trace": "op-trace"})),
         ),
         row(
             "revert of one of two operator members",
             json!({"metadata": {"user_id": "u-client-1", "trace": "op-trace"}}),
             Some(json!({"metadata": {"trace": "op-trace", "team": "op-team"}})),
             Some(json!({"trace": "op-trace"})),
+            Some(json!({"trace": "op-trace", "team": "op-team"})),
         ),
         row(
             "revert restored the client's value of an operator member",
             json!({"metadata": {"team": "u-client-team", "trace": "op-trace"}}),
             Some(json!({"metadata": {"trace": "op-trace", "team": "op-team"}})),
             Some(json!({"trace": "op-trace"})),
+            Some(json!({"trace": "op-trace", "team": "op-team"})),
         ),
         row(
             "merged extras lack the key: nothing from payload_extras",
             json!({}),
             Some(json!({"metadata": {"trace": "op-trace"}})),
             None,
+            None,
         ),
     ]
 }
 
 #[test]
-fn only_operator_metadata_the_attempt_still_carries_reaches_any_bedrock_surface() {
+fn only_operator_metadata_the_attempt_still_carries_reaches_any_anthropic_shaped_bedrock_surface() {
     let mut failures = Vec::new();
-    for surface in SURFACES {
+    for surface in ANTHROPIC_SHAPED {
         for row in metadata_rows() {
             let req = attempt(row.merged.clone(), row.payload.clone());
 
             let body = normalize_on(surface, &req);
 
-            let want = row.want.clone();
             let got = shipped_metadata_on(surface, &body);
             let serialized = body.to_string();
-            // openai-compat forwards the operator's recorded `metadata` whole
-            // rather than the members the attempt still carries, so only the
-            // absence check below is its contract here.
-            if surface != Surface::MantleOpenaiCompat && got != want {
+            if got != row.want {
                 failures.push(format!("{surface:?} / {}: shipped {got:?}", row.name));
             }
             if serialized.contains(CLIENT_MARK) || serialized.contains("user_id") {
@@ -389,6 +398,42 @@ fn only_operator_metadata_the_attempt_still_carries_reaches_any_bedrock_surface(
                     row.name
                 ));
             }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn no_client_identity_reaches_the_mantle_openai_compat_lane() {
+    let mut failures = Vec::new();
+    for row in metadata_rows() {
+        let req = attempt(row.merged.clone(), row.payload.clone());
+
+        let body = normalize_on(Surface::MantleOpenaiCompat, &req);
+
+        let serialized = body.to_string();
+        if body.get("user").is_some()
+            || serialized.contains(CLIENT_MARK)
+            || serialized.contains("user_id")
+        {
+            failures.push(format!("{}: client identity in {serialized}", row.name));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn the_mantle_openai_compat_lane_ships_the_operator_metadata_whole_while_the_attempt_carries_the_key()
+ {
+    let mut failures = Vec::new();
+    for row in metadata_rows() {
+        let req = attempt(row.merged.clone(), row.payload.clone());
+
+        let body = normalize_on(Surface::MantleOpenaiCompat, &req);
+
+        let got = shipped_metadata_on(Surface::MantleOpenaiCompat, &body);
+        if got != row.openai_compat_want {
+            failures.push(format!("{}: shipped {got:?}", row.name));
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
@@ -422,62 +467,84 @@ fn metadata_strip_edits_on(surface: Surface, mut req: ChatRequest) -> Vec<(EditK
         .collect()
 }
 
-/// The fingerprint removals `surface` declares for a row whose Anthropic
-/// surfaces declare `metadata_paths`. openai-compat declares its `metadata`
-/// withhold under the managed-extras site instead, and the canonical `user`
-/// the ingress mirrored from `metadata.user_id` at `/user`.
-fn declared_fingerprint_paths(
-    surface: Surface,
-    merged: &Value,
-    metadata_paths: &[&'static str],
-) -> Vec<&'static str> {
-    match surface {
-        Surface::MantleOpenaiCompat => merged
-            .pointer("/metadata/user_id")
-            .map(|_| vec!["/user"])
-            .unwrap_or_default(),
-        _ => metadata_paths.to_vec(),
+struct DeclaredRow {
+    name: &'static str,
+    merged: Value,
+    operator: Option<Value>,
+    /// The fingerprint removals an Anthropic-shaped surface declares.
+    metadata_paths: &'static [&'static str],
+    /// The fingerprint removals openai-compat declares: its `metadata`
+    /// withhold sits under the managed-extras site, so only the canonical
+    /// `user` the ingress mirrored from `metadata.user_id` shows here.
+    openai_compat_paths: &'static [&'static str],
+}
+
+fn declared_rows() -> [DeclaredRow; 4] {
+    [
+        DeclaredRow {
+            name: "client only: the whole block",
+            merged: json!({"metadata": {"user_id": "u-client-1"}}),
+            operator: None,
+            metadata_paths: &["/metadata"],
+            openai_compat_paths: &["/user"],
+        },
+        DeclaredRow {
+            name: "nested client member beside the operator's nested member",
+            merged: json!({"metadata": {"tags": {"user": "u-client-3", "env": "prod"}}}),
+            operator: Some(json!({"metadata": {"tags": {"env": "prod"}}})),
+            metadata_paths: &["/metadata/*/*"],
+            openai_compat_paths: &[],
+        },
+        DeclaredRow {
+            name: "top-level and nested client members",
+            merged: json!({"metadata": {"user_id": "u-client-1", "tags": {"user": "u-client-3", "env": "prod"}}}),
+            operator: Some(json!({"metadata": {"tags": {"env": "prod"}}})),
+            metadata_paths: &["/metadata/*", "/metadata/*/*"],
+            openai_compat_paths: &["/user"],
+        },
+        DeclaredRow {
+            name: "the operator's own value: nothing",
+            merged: json!({"metadata": {"trace": "op-trace"}}),
+            operator: Some(json!({"metadata": {"trace": "op-trace"}})),
+            metadata_paths: &[],
+            openai_compat_paths: &[],
+        },
+    ]
+}
+
+fn removals(paths: &[&str]) -> Vec<(EditKind, String)> {
+    paths
+        .iter()
+        .map(|p| (EditKind::Remove, (*p).to_string()))
+        .collect()
+}
+
+#[test]
+fn each_withheld_client_member_is_declared_at_its_depth_on_every_anthropic_shaped_surface() {
+    for surface in ANTHROPIC_SHAPED {
+        for row in declared_rows() {
+            let req = attempt(row.merged.clone(), row.operator.clone());
+
+            let edits = metadata_strip_edits_on(surface, req);
+
+            assert_eq!(
+                edits,
+                removals(row.metadata_paths),
+                "{surface:?} / {}",
+                row.name
+            );
+        }
     }
 }
 
 #[test]
-fn each_withheld_client_member_is_declared_at_its_depth_on_every_surface() {
-    let rows: [(&str, Value, Option<Value>, &[&str]); 4] = [
-        (
-            "client only: the whole block",
-            json!({"metadata": {"user_id": "u-client-1"}}),
-            None,
-            &["/metadata"],
-        ),
-        (
-            "nested client member beside the operator's nested member",
-            json!({"metadata": {"tags": {"user": "u-client-3", "env": "prod"}}}),
-            Some(json!({"metadata": {"tags": {"env": "prod"}}})),
-            &["/metadata/*/*"],
-        ),
-        (
-            "top-level and nested client members",
-            json!({"metadata": {"user_id": "u-client-1", "tags": {"user": "u-client-3", "env": "prod"}}}),
-            Some(json!({"metadata": {"tags": {"env": "prod"}}})),
-            &["/metadata/*", "/metadata/*/*"],
-        ),
-        (
-            "the operator's own value: nothing",
-            json!({"metadata": {"trace": "op-trace"}}),
-            Some(json!({"metadata": {"trace": "op-trace"}})),
-            &[],
-        ),
-    ];
-    for surface in SURFACES {
-        for (name, merged, operator, want) in &rows {
-            let edits = metadata_strip_edits_on(surface, attempt(merged.clone(), operator.clone()));
+fn the_mantle_openai_compat_lane_declares_the_withheld_client_user_at_user() {
+    for row in declared_rows() {
+        let req = attempt(row.merged.clone(), row.operator.clone());
 
-            let want: Vec<(EditKind, String)> = declared_fingerprint_paths(surface, merged, want)
-                .iter()
-                .map(|p| (EditKind::Remove, (*p).to_string()))
-                .collect();
-            assert_eq!(edits, want, "{surface:?} / {name}");
-        }
+        let edits = metadata_strip_edits_on(Surface::MantleOpenaiCompat, req);
+
+        assert_eq!(edits, removals(row.openai_compat_paths), "{}", row.name);
     }
 }
 
