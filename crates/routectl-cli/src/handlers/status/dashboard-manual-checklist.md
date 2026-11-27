@@ -238,7 +238,7 @@ banner, no retry signal -- silently mislabeled data.
   faint `0` and nothing under it; the full "Every check passed" card shows.
 - The reachability line reads `Lanes, from real traffic since the daemon
   started (Doctor sends no test requests): ...`. Right after a restart every
-  route reads `not used yet`; a route whose request succeeds moves
+  lane reads `not used yet`; a lane whose request succeeds moves
   to `reachable`. This line and the one-line checks all-clear are set in
   the page's sans text font, not monospace.
 

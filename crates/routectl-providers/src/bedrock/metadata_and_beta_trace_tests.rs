@@ -205,6 +205,7 @@ enum Surface {
     Invoke,
     Converse,
     MantleAnthropic,
+    #[cfg(feature = "openai-compat")]
     MantleOpenaiCompat,
 }
 
@@ -212,6 +213,7 @@ enum Surface {
 const ANTHROPIC_SHAPED: [Surface; 3] =
     [Surface::Invoke, Surface::Converse, Surface::MantleAnthropic];
 
+#[cfg(feature = "openai-compat")]
 fn mantle_openai_compat() -> crate::openai_compat::OpenAiCompatProvider {
     crate::openai_compat::OpenAiCompatProvider::new(crate::openai_compat::OpenAiCompatConfig {
         mantle: Some(crate::mantle::MantleAuth {
@@ -245,6 +247,7 @@ fn normalize_on(surface: Surface, req: &ChatRequest) -> Value {
             )
             .expect("assembles");
         }
+        #[cfg(feature = "openai-compat")]
         Surface::MantleOpenaiCompat => {
             return routectl_core::Provider::normalize_request(&mantle_openai_compat(), req)
                 .expect("assembles");
@@ -255,9 +258,9 @@ fn normalize_on(surface: Surface, req: &ChatRequest) -> Value {
 
 fn shipped_metadata_on(surface: Surface, body: &Value) -> Option<Value> {
     match surface {
-        Surface::Invoke | Surface::MantleAnthropic | Surface::MantleOpenaiCompat => {
-            body.get("metadata").cloned()
-        }
+        Surface::Invoke | Surface::MantleAnthropic => body.get("metadata").cloned(),
+        #[cfg(feature = "openai-compat")]
+        Surface::MantleOpenaiCompat => body.get("metadata").cloned(),
         Surface::Converse => shipped_metadata(BedrockApiShape::Converse, body),
     }
 }
@@ -290,6 +293,7 @@ struct MetadataRow {
     want: Option<Value>,
     /// What openai-compat ships: the operator's recorded value whole, for a
     /// key the attempt still carries.
+    #[cfg_attr(not(feature = "openai-compat"), allow(dead_code))]
     openai_compat_want: Option<Value>,
 }
 
@@ -403,6 +407,7 @@ fn only_operator_metadata_the_attempt_still_carries_reaches_any_anthropic_shaped
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
+#[cfg(feature = "openai-compat")]
 #[test]
 fn no_client_identity_reaches_the_mantle_openai_compat_lane() {
     let mut failures = Vec::new();
@@ -422,6 +427,7 @@ fn no_client_identity_reaches_the_mantle_openai_compat_lane() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
+#[cfg(feature = "openai-compat")]
 #[test]
 fn the_mantle_openai_compat_lane_ships_the_operator_metadata_whole_while_the_attempt_carries_the_key()
  {
@@ -476,6 +482,7 @@ struct DeclaredRow {
     /// The fingerprint removals openai-compat declares: its `metadata`
     /// withhold sits under the managed-extras site, so only the canonical
     /// `user` the ingress mirrored from `metadata.user_id` shows here.
+    #[cfg_attr(not(feature = "openai-compat"), allow(dead_code))]
     openai_compat_paths: &'static [&'static str],
 }
 
@@ -537,6 +544,7 @@ fn each_withheld_client_member_is_declared_at_its_depth_on_every_anthropic_shape
     }
 }
 
+#[cfg(feature = "openai-compat")]
 #[test]
 fn the_mantle_openai_compat_lane_declares_the_withheld_client_user_at_user() {
     for row in declared_rows() {

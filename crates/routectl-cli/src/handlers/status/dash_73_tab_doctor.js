@@ -119,11 +119,11 @@
   // page: the per-target last outcome it folds is the Models view's subject, so
   // repeating those rows here would show the same fact twice.
   //
-  // Each verdict is one route's last settled client request since the daemon
+  // Each verdict is one lane's last settled client request since the daemon
   // started: the doctor dials nothing, and background capability probes
-  // neither credit nor debit a route. A route stays `unknown` until a request
+  // neither credit nor debit a lane. A lane stays `unknown` until a request
   // ends in success or in a failure that counts against its circuit, so a
-  // route that only ever saw a 400 still reads "not used yet".
+  // lane that only ever saw a 400 still reads "not used yet".
   var REACH_LEAD = 'Lanes, from real traffic since the daemon started (Doctor sends no test requests): ';
 
   function doctorReach(reachability) {
