@@ -480,6 +480,10 @@ list with more narrative.
 
 - **The dashboard's Config tab shows the whole config path and says when pool order matters.** The config file sits on its own row of the version strip and wraps only after a `/`, so a long path is never cut and copies exactly; it no longer carries a tooltip duplicate. The Pools members column is headed `Members`, and only a `fill-first` pool adds `tried in the order listed` under its members (a `sticky-least-loaded` pool lists them without numbering).
 
+- **The Models table draws an absent value as a faint dash.** A lane with no refusal reads a faint `-` in Refuses, and a lane nothing was checked on a faint `-` in Changed in transit; a screen reader still reads `none` and `unmeasured`. Refuses is now as wide as its content, so at 1024 px the whole table fits its card. Column order is unchanged.
+
+- **The sort hint on a dashboard table header sits inside its focus ring.** Each sortable header keeps room for its mark after the label, so the faint `^v` shown on hover or keyboard focus, and the sorted header's `^` or `v`, draw inside the focus ring, and a header never changes width when the hint appears.
+
 - **The dashboard marks only the sorted column header.** A sortable header that is not the sorted one no longer carries a sort mark at rest; it shows a faint `^v` while hovered or keyboard-focused, and the sorted header keeps its `^` or `v`. This applies on every sortable table (Traffic and Config).
 
 - **Dashboard row toggles on Models are named by what the row shows.** Each lane's expand button is announced as `Details for <nicknames> on <provider>`, the nickname and provider cells of the row, instead of the internal lane key. Row ids and addresses are unchanged. Traffic and Config already named their toggles by the row's own label.

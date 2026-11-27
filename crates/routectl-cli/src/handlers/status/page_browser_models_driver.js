@@ -125,8 +125,10 @@
         }),
         provider: cells[3].textContent,
         state: cells[1].textContent,
-        refuses: cells[6].textContent,
-        transit: cells[7].textContent,
+        refuses: d.shownText(cells[6]),
+        refuses_name: d.accessibleName(cells[6]),
+        transit: d.shownText(cells[7]),
+        transit_name: d.accessibleName(cells[7]),
         toggle_name: document.getElementById(tr.id + '-toggle').getAttribute('aria-label'),
         detail_labels: Array.prototype.map.call(detail.querySelectorAll('dt'), function (dt) {
           return dt.textContent;
@@ -190,7 +192,7 @@
       unused: unused ? textIn(unused, 'summary') : null,
       error_cards: body.querySelectorAll('.unavailable-msg, .incompatible-msg').length,
       transit_nodes: Array.prototype.map.call(body.querySelectorAll('.models-transit'), function (n) {
-        return n.textContent;
+        return d.accessibleName(n);
       }),
       detail_transit: Array.prototype.map.call(body.querySelectorAll('.detail-row .def'), function (n) {
         return n.textContent;
@@ -228,6 +230,77 @@
       return resp;
     });
   };
+
+  // The computed color `color: var(--faint)` resolves to in the page's theme.
+  function faintColor() {
+    var probe = document.createElement('span');
+    probe.style.color = 'var(--faint)';
+    document.body.appendChild(probe);
+    var color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  }
+
+  function edges(node) {
+    var r = node.getBoundingClientRect();
+    return { left: r.left, right: r.right, width: r.width };
+  }
+
+  // The width the main table's Refuses header label draws at, without the
+  // cell's padding.
+  function labelWidth(th) {
+    var range = document.createRange();
+    range.selectNodeContents(th);
+    return range.getBoundingClientRect().width;
+  }
+
+  // The Refuses column's width with the table at its max-content width, so
+  // no leftover card width is shared into it: what its cells ask for.
+  function ownWidth(table, th) {
+    var was = table.style.width;
+    table.style.width = 'max-content';
+    var width = th.getBoundingClientRect().width;
+    table.style.width = was;
+    return width;
+  }
+
+  // Where the main table's last two columns sit against the scroller that
+  // shows the card's content, and how each absent value draws.
+  function reach() {
+    var wrap = document.getElementById('models-lanes-wrap');
+    var ths = document.querySelectorAll('#models-lanes thead th');
+    var refuses = ths[6];
+    var transit = ths[7];
+    var cs = getComputedStyle(refuses);
+    var absent = document.querySelectorAll('#models-lanes .models-absent');
+    return {
+      inner_width: window.innerWidth,
+      wrap: edges(wrap),
+      wrap_scroll: wrap.scrollWidth,
+      wrap_client: wrap.clientWidth,
+      refuses_header: refuses.textContent,
+      refuses: edges(refuses),
+      refuses_own: ownWidth(document.getElementById('models-lanes'), refuses),
+      refuses_label: labelWidth(refuses),
+      refuses_padding: parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight),
+      transit_header: transit.textContent,
+      transit: edges(transit),
+      transit_cells: Array.prototype.map.call(
+        document.querySelectorAll('#models-lanes tr.exp-row'), function (tr) {
+          return edges(tr.children[7]);
+        }),
+      faint: faintColor(),
+      absent_colors: Array.prototype.map.call(absent, function (n) {
+        return getComputedStyle(n).color;
+      })
+    };
+  }
+
+  d.scenario('models-reach', function () {
+    return d.waitUntil('the lane table', lanesDrawn).then(lanesQueryAnswered)
+      .then(function () { return d.sleep(300); })
+      .then(reach);
+  });
 
   d.scenario('models-rows', function () {
     var ready = d.waitUntil('the lane table', lanesDrawn);

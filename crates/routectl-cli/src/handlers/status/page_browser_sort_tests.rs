@@ -318,6 +318,66 @@ fn page_browser_only_the_sorted_header_shows_a_mark_at_rest() {
     );
 }
 
+/// The rounding between a range's box and a pseudo-element's used `left`.
+const SUBPIXEL: f64 = 0.5;
+
+fn edge(report: &Value, part: &str, side: &str) -> f64 {
+    report[part][side]
+        .as_f64()
+        .unwrap_or_else(|| panic!("no {part}.{side}: {report:#}"))
+}
+
+/// The neutral hint on a keyboard-focused unpressed header draws after its
+/// label and inside its focus ring, clear of the ring's 2px stroke, and so
+/// does a pressed header's own mark; the header is as wide with the hint
+/// shown as at rest. Read from the drawn boxes: the button grown by its
+/// outline, the label's text, and the hint's used position and width.
+/// Positive control: the hint is the one drawn (its content, and a non-zero
+/// width), and the ring is a solid outline.
+///
+/// Mutation checks: drop the right padding from `.sort-btn` -> red (no room
+/// kept, so the hint lands over the label); set `.sort-btn::after` `left: 0`
+/// -> red (over the label); put back the out-of-flow `left: 100%` -> red
+/// (the hint past the ring).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_the_focus_ring_encloses_the_sort_hint() {
+    let out = browser::run_scenario(&sort_scenario("sort-hint-box", "config")).result;
+
+    for at in ["focused", "pressed_focused"] {
+        let o = &out[at];
+        assert_eq!(o["focus_visible"], true, "{at}: {out:#}");
+        assert_eq!(o["ring"]["style"], "solid", "{at}: {out:#}");
+        assert!(
+            edge(o, "mark", "width") > 0.0,
+            "{at}: no mark drawn: {out:#}"
+        );
+        assert!(
+            edge(o, "mark", "left") >= o["label_right"].as_f64().expect("label edge") - SUBPIXEL,
+            "{at}: the mark is drawn over the label: {out:#}"
+        );
+        assert!(
+            edge(o, "mark", "right") <= edge(o, "ring", "right") - 2.0,
+            "{at}: the mark is drawn past the focus ring: {out:#}"
+        );
+    }
+    assert_eq!(
+        out["focused"]["content"],
+        Value::from("\" ^v\" / \"\""),
+        "{out:#}"
+    );
+    assert_eq!(out["pressed_focused"]["content"], "\" ^\"", "{out:#}");
+    assert_eq!(out["rest"]["content"], "none", "{out:#}");
+    assert_eq!(
+        out["rest"]["header_width"], out["focused"]["header_width"],
+        "the header changed width when the hint appeared: {out:#}"
+    );
+    assert_eq!(
+        out["rest"]["button"]["width"], out["focused"]["button"]["width"],
+        "{out:#}"
+    );
+}
+
 // ---- source check: the sort registry and the sortable columns ---------------
 
 use view_contract::{call_args, call_end, quoted_literal, split_args};

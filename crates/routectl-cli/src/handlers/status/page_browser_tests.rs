@@ -356,10 +356,19 @@ pub(super) fn run_scenario_with(scenario: &Scenario, chrome_switches: &[&str]) -
 /// [`run_scenario`] against one review case built at the fixture instant
 /// instead of the populated fixtures.
 pub(super) fn run_case_scenario(scenario: &Scenario, case: CaseServed) -> DriverReport {
+    run_case_scenario_with(scenario, case, &[])
+}
+
+/// [`run_case_scenario`] with extra Chrome switches, such as a window size.
+pub(super) fn run_case_scenario_with(
+    scenario: &Scenario,
+    case: CaseServed,
+    chrome_switches: &[&str],
+) -> DriverReport {
     run_page(
         scenario,
         page_with_driver(scenario),
-        &[],
+        chrome_switches,
         None,
         Payloads::Case(Box::new(case)),
     )

@@ -222,6 +222,45 @@
     });
   });
 
+  // A header button's box, the box its focus ring is drawn around (the
+  // button grown by the outline's offset and width), where its label's text
+  // ends, and the box of the mark after the label, from the mark's used
+  // position and size.
+  function markGeometry(column) {
+    var btn = headerButton(column);
+    var b = btn.getBoundingClientRect();
+    var cs = getComputedStyle(btn);
+    var ring = parseFloat(cs.outlineOffset) + parseFloat(cs.outlineWidth);
+    var after = getComputedStyle(btn, '::after');
+    var left = b.left + parseFloat(after.left);
+    var label = document.createRange();
+    label.selectNodeContents(btn);
+    return {
+      label_right: label.getBoundingClientRect().right,
+      content: after.content,
+      button: { left: b.left, right: b.right, width: b.width },
+      ring: { left: b.left - ring, right: b.right + ring, style: cs.outlineStyle },
+      mark: { left: left, right: left + parseFloat(after.width), width: parseFloat(after.width) },
+      header_width: btn.closest('th').getBoundingClientRect().width,
+      focus_visible: btn.matches(':focus-visible')
+    };
+  }
+
+  // An unpressed header at rest and with keyboard focus, then the same
+  // header pressed (its own mark) with focus.
+  d.scenario('sort-hint-box', function () {
+    return waitForTable().then(function () {
+      var out = { rest: markGeometry('provider') };
+      headerButton('provider').focus();
+      out.focused = markGeometry('provider');
+      headerButton('provider').blur();
+      headerButton('provider').click();
+      headerButton('provider').focus();
+      out.pressed_focused = markGeometry('provider');
+      return out;
+    });
+  });
+
   function sectionReport() {
     var body = byId('body-config');
     return {

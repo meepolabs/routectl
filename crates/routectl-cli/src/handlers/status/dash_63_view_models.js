@@ -20,7 +20,7 @@
   // scrolls. The Model column links each nickname to Traffic narrowed to it
   // on the lane's own provider entry.
   var MODELS_COLUMNS = [C('State'), R('Model'), C('Provider'), C('Upstream'), C('Account'),
-    W('Refuses'), C('Changed in transit')];
+    C('Refuses'), C('Changed in transit')];
 
   function modelsSection(rec) {
     var rows = rec.data.rows;
@@ -308,8 +308,22 @@
     var wrap = document.createElement('span');
     wrap.className = 'hchips';
     row.refusals.forEach(function (refusal) { wrap.appendChild(modelsRefusalChip(refusal)); });
-    if (!wrap.childNodes.length) { wrap.appendChild(faintFigure('none')); }
+    if (!wrap.childNodes.length) { wrap.appendChild(modelsAbsent('none')); }
     return wrap;
+  }
+
+  // An absent value as a faint dash, its word kept for a screen reader.
+  // The wrapper is positioned so the visually hidden word stays inside a
+  // table that scrolls in its card instead of widening the page.
+  function modelsAbsent(word) {
+    var span = markValue(document.createElement('span'), word);
+    span.className = 'models-absent mag-zero';
+    var dash = document.createElement('span');
+    dash.setAttribute('aria-hidden', 'true');
+    dash.textContent = '-';
+    span.appendChild(dash);
+    span.appendChild(srOnlyText(word));
+    return span;
   }
 
   // Plain words for the verdict tokens the models panel sends whose words
@@ -354,7 +368,7 @@
   }
 
   // Exact counts beside the number of responses checked. A lane nothing was
-  // checked on reads "unmeasured", never zero.
+  // checked on reads "unmeasured" (drawn as a faint dash), never zero.
   function modelsTransitText(transit) {
     var checked = num0(transit.checked);
     if (checked <= 0) { return 'unmeasured'; }
@@ -363,13 +377,18 @@
 
   function modelsTransitCell(row) {
     var text = modelsTransitText(row.transit);
+    if (text === 'unmeasured') {
+      var absent = modelsAbsent(text);
+      absent.classList.add('models-transit');
+      return absent;
+    }
     var span = markValue(document.createElement('span'), text);
-    span.className = 'models-transit' + (text === 'unmeasured' ? ' mag-zero' : '');
+    span.className = 'models-transit';
     span.textContent = text;
     return span;
   }
 
-  // The row's Changed in transit cell already reads `unmeasured`, so the
+  // The row's Changed in transit cell already says `unmeasured`, so the
   // expansion adds transit lines only when it has counts or paths to show.
   function modelsDetail(row, ctx) {
     var pairs = [['lane', row.lane]];
@@ -413,7 +432,7 @@
         (cell.source ? ', ' + cell.source + ' evidence' : '');
       wrap.appendChild(chip);
     });
-    if (!wrap.childNodes.length) { wrap.appendChild(faintFigure('none')); }
+    if (!wrap.childNodes.length) { wrap.appendChild(modelsAbsent('none')); }
     return wrap;
   }
 

@@ -236,9 +236,10 @@ banner, no retry signal -- silently mislabeled data.
   `broken` row for the shared `<provider>#<upstream>` lane and nothing for the
   other. The Models table shows ONE row for the shared lane, naming both
   nicknames, and one row for the third. The shared row's Refuses cell carries
-  the capability chip; the other row reads `none`. Two rows for the shared
-  lane, or a `none` on it, means the rows are no longer keyed by the learned
-  lane.
+  the capability chip; the other row shows a faint `-`, which a screen reader
+  reads as `none`. Two rows for the shared lane, or a dash on it, means the
+  rows are no longer keyed by the learned lane. The Refuses column is only as
+  wide as its content.
 - Seed a learned output ceiling (`ceiling:<n>`) on a lane. Hover its chip:
   the tooltip ends in `value ceiling:<n>`; a chip for a capability whose
   verdict writes no value ends in `value -`. The chip reads the capability
@@ -271,7 +272,9 @@ banner, no retry signal -- silently mislabeled data.
   `/status/query` in devtools for two polls: the fold stays open, the row
   stays expanded, and nothing moves back into the main table.
 - Changed in transit reads `<changed> of <checked> responses changed` for a
-  lane the wire check sampled and `unmeasured` (faint) for one it never did;
+  lane the wire check sampled and a faint `-` for one it never did (a screen
+  reader reads it as `unmeasured`); at 1024 px on the `passthrough-hop` review
+  case the column sits inside the card with no sideways scroll;
   the expanded row of a sampled lane adds `since <start>` and the
   most-changed field paths, and that of an unmeasured lane adds no transit
   line at all. No wording on the tab says error, loss or rate for transit.
@@ -413,7 +416,10 @@ banner, no retry signal -- silently mislabeled data.
   selected, in both themes.
 - On Traffic and Config, only the sorted column header carries a mark (`^`
   or `v`); the other sortable headers are bare at rest and show a faint
-  `^v` while hovered or Tab-focused, without the column shifting.
+  `^v` while hovered or Tab-focused, without the column shifting. Tab to an
+  unsorted header: the focus ring goes round the label and the `^v` hint
+  together, never through the hint; a sorted header's `^` or `v` sits inside
+  its ring the same way.
 
 ## UI review cases
 

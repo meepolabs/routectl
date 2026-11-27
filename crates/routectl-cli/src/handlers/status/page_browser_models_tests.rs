@@ -754,3 +754,113 @@ fn page_browser_models_nickname_links_are_light_at_rest() {
     assert_eq!(link["focus_decoration"], "underline", "{link:#}");
     assert_eq!(link["focus_outline"], "solid 2px", "{link:#}");
 }
+
+/// A lane with no refusal and one nothing was checked on draw a faint dash
+/// in Refuses and in Changed in transit, and a screen reader is handed the
+/// word: Chrome's computed name reads `none` and `unmeasured`. A measured
+/// lane keeps its counts as drawn. Positive control: the busy lane's cells
+/// are the ones read (both absent), and its state reads `ok`.
+///
+/// Mutation checks: append the word as plain text instead of hidden text in
+/// modelsAbsent -> red (the shown text is the word); drop the hidden word
+/// -> red (the name is `-`).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_models_an_absent_value_draws_a_dash_and_reads_its_word() {
+    let result = hop_case(&[MODELS_DRIVER]);
+
+    let busy = lane_row(&result, "models-lanes", "busy#claude-sonnet-4-5");
+    assert_eq!(busy["state"], "ok", "{busy:#}");
+    assert_eq!(busy["refuses"], "-", "{busy:#}");
+    assert_eq!(busy["refuses_name"], "none", "{busy:#}");
+    assert_eq!(busy["transit"], "-", "{busy:#}");
+    assert_eq!(busy["transit_name"], "unmeasured", "{busy:#}");
+
+    let measured = populated("models-rows", &[MODELS_DRIVER]);
+    let counted = drawn(&measured)
+        .iter()
+        .find(|r| r["transit"] == "2 of 5 responses changed")
+        .unwrap_or_else(|| panic!("a measured lane: {measured:#}"));
+    assert_eq!(
+        counted["transit_name"], "2 of 5 responses changed",
+        "{counted:#}"
+    );
+}
+
+const HOP_SCREEN: &str = "--window-size=1024,900";
+
+fn hop_reach() -> Value {
+    browser::run_case_scenario_with(
+        &browser::Scenario {
+            name: "models-reach",
+            hash: "models",
+            snippets: &[MODELS_DRIVER],
+            budget_ms: MODELS_BUDGET_MS,
+        },
+        browser::CaseServed {
+            source: CaseSource::open(UiCase::PassthroughHop, FIXTURE_NOW_MS, "127.0.0.1:8787"),
+            now_ms: Some(FIXTURE_NOW_MS),
+        },
+        &[HOP_SCREEN],
+    )
+    .result
+}
+
+fn px(v: &Value, part: &str, side: &str) -> f64 {
+    v[part][side]
+        .as_f64()
+        .unwrap_or_else(|| panic!("no {part}.{side}: {v:#}"))
+}
+
+/// At 1024 px on the passthrough hop, whose lanes refuse nothing and are
+/// unmeasured, the whole table fits its card: the Changed in transit header
+/// and every lane's transit cell end inside the scroller, which has nothing
+/// to scroll. The Refuses column asks for no more than its header label and
+/// padding (read with the table at its max-content width, so no leftover
+/// card width is shared into it), and each absent value draws in the faint
+/// color. Positive control: the
+/// window is 1024 px and the columns read are the named ones.
+///
+/// Mutation checks: draw `unmeasured` as a word again in modelsTransitCell
+/// -> red (seven faint dashes, not eight); make Refuses a wrapping column again
+/// (`W('Refuses')`) -> red (Refuses wider than its label); drop `mag-zero`
+/// from modelsAbsent -> red (a dash in the cell color).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_models_changed_in_transit_fits_the_card_at_1024() {
+    let out = hop_reach();
+
+    assert_eq!(out["inner_width"], 1024, "{out:#}");
+    assert_eq!(out["refuses_header"], "Refuses", "{out:#}");
+    assert_eq!(out["transit_header"], "Changed in transit", "{out:#}");
+    let wrap_right = px(&out, "wrap", "right");
+    assert!(
+        px(&out, "transit", "right") <= wrap_right + 1.0,
+        "Changed in transit is past the card: {out:#}"
+    );
+    let cells = out["transit_cells"].as_array().expect("transit cells");
+    assert_eq!(cells.len(), 4, "{out:#}");
+    for cell in cells {
+        let right = cell["right"].as_f64().expect("a cell edge");
+        assert!(
+            right <= wrap_right + 1.0,
+            "a transit cell is past the card: {out:#}"
+        );
+    }
+    assert!(
+        out["wrap_scroll"].as_f64() <= out["wrap_client"].as_f64().map(|c| c + 1.0),
+        "the lanes scroll sideways at 1024 px: {out:#}"
+    );
+    let content = out["refuses_label"].as_f64().expect("label width")
+        + out["refuses_padding"].as_f64().expect("padding");
+    let own = out["refuses_own"].as_f64().expect("Refuses own width");
+    assert!(
+        own <= content + 1.0,
+        "Refuses asks for more than its header: {out:#}"
+    );
+    let colors = out["absent_colors"].as_array().expect("absent colors");
+    assert_eq!(colors.len(), 8, "{out:#}");
+    for color in colors {
+        assert_eq!(color, &out["faint"], "{out:#}");
+    }
+}

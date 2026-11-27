@@ -172,6 +172,7 @@
 .models-since,
 .models-recovered { font-size: var(--fs-xs); color: var(--faint); }
 .models-transit { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.models-absent { position: relative; }
 .models-paths {
   display: flex;
   flex-direction: column;
@@ -192,6 +193,9 @@
 .models-unused > summary { cursor: pointer; color: var(--muted); font-size: var(--fs-sm); }
 .models-unused > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .models-unused[open] > summary { margin-bottom: var(--sp-2); }
+/* A chip list in a table cell is as wide as its chips, up to a measure past
+   which it wraps. */
+td > .hchips { max-width: 24rem; }
 .hchips {
   display: flex;
   flex-wrap: wrap;
