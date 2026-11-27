@@ -196,15 +196,11 @@ struct Inner {
     /// a tiny CPU-only critical section.
     refresh_locks: std::sync::Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     /// Monotonic counter bumped by every successful `reload_from_disk`
-    /// call (under the file `RwLock` write guard). `refresh_under_lock`
-    /// snapshots this before the network POST and re-reads it under the
-    /// file write lock before committing the refresh result; if the
-    /// counter changed, a reload ran while the POST was in-flight and
-    /// brought in a newer on-disk state -- the refresh result is
-    /// discarded rather than clobbering the reload. `AtomicU64` so
-    /// the snapshot read in `refresh_under_lock` does not need to
-    /// acquire the file lock twice (once for the double-check and
-    /// once for the final write).
+    /// call (under the file `RwLock` write guard), so a reader holding the
+    /// read guard sees a value that matches the cache it reads. It counts
+    /// reloads, not changes: a reload that changed nothing still bumps it.
+    /// A refresh does not consult it; its commit compares the seat's
+    /// disk-fresh record instead (see `refresh_seat`).
     reload_gen: std::sync::atomic::AtomicU64,
     /// Per-seat transient-failure cooldown. During an IdP outage the
     /// per-seat single-flight gate collapses each request wave to one
@@ -233,6 +229,11 @@ struct Inner {
     /// so it cannot exist in a production binary.
     #[cfg(any(test, feature = "test-utils"))]
     now_override: std::sync::atomic::AtomicU64,
+    /// Test seam: when set, `reload_from_disk` parks on this gate after
+    /// its disk read and before it swaps the cache, so a test can run
+    /// other store operations inside that window.
+    #[cfg(test)]
+    reload_read_gate: Option<Arc<test_support::ParkGate>>,
 }
 
 /// In-memory transient-failure cooldown state for one seat. Lives in
@@ -292,6 +293,8 @@ impl OAuthStore {
                 refresh_flow: None,
                 #[cfg(any(test, feature = "test-utils"))]
                 now_override: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(test)]
+                reload_read_gate: None,
             }),
         })
     }
@@ -324,6 +327,8 @@ impl OAuthStore {
                 refresh_flow: None,
                 #[cfg(any(test, feature = "test-utils"))]
                 now_override: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(test)]
+                reload_read_gate: None,
             }),
         })
     }

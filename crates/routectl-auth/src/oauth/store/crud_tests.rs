@@ -131,6 +131,7 @@ async fn write_record_failure_does_not_corrupt_memory_cache() {
             refresh_cooldowns: std::sync::Mutex::new(BTreeMap::new()),
             refresh_flow: None,
             now_override: std::sync::atomic::AtomicU64::new(0),
+            reload_read_gate: None,
         }),
     };
 

@@ -760,16 +760,15 @@ async fn refresh_preserves_session_id_across_rotation() {
     assert_eq!(post.access_token.expose(), "tok-refreshed");
 }
 
-/// A `reload_from_disk` that completes while a refresh POST is
-/// in-flight must win: the refresh result must be discarded and the
-/// reloaded token left in cache. This exercises the generation-counter
-/// guard in `refresh_under_lock` step 4.
+/// A `reload_from_disk` that brings in a re-login of the seat while a
+/// refresh POST is in flight must win: the refresh result is discarded
+/// and the reloaded token left in cache, because the commit finds a
+/// different grant for the seat on disk.
 ///
 /// Interleaving: `CountingFlow` yields twice inside `refresh_token`.
-/// The reload arm yields once first (so the refresh task starts and
-/// captures `gen_before`), then calls `reload_from_disk` (bumps gen).
-/// When the refresh task resumes it finds `gen_now != gen_before` and
-/// returns the reloaded record without clobbering the cache.
+/// The reload arm yields once first (so the refresh task starts), then
+/// calls `reload_from_disk`. When the refresh task resumes, its commit
+/// sees the re-login on disk and returns it without clobbering the cache.
 #[tokio::test]
 async fn reload_during_refresh_wins_over_stale_result() {
     let dir = tempfile::tempdir().unwrap();
@@ -814,9 +813,8 @@ async fn reload_during_refresh_wins_over_stale_result() {
                 })
                 .await
         },
-        // Arm B: yield once (so A starts and captures gen_before),
-        // then reload. This bumps the generation counter before A
-        // can acquire the file write lock.
+        // Arm B: yield once (so A starts), then reload the re-login
+        // before A can acquire the file write lock.
         async move {
             tokio::task::yield_now().await;
             store_b.reload_from_disk().await
@@ -829,12 +827,12 @@ async fn reload_during_refresh_wins_over_stale_result() {
         "reload should succeed: {reload_result:?}"
     );
     // The refresh endpoint was called exactly once (it just
-    // discarded its result due to the gen mismatch).
+    // discarded its result because the seat was re-logged in).
     assert_eq!(flow.call_count(), 1, "refresh endpoint called exactly once");
 
     // The in-memory cache must reflect the reloaded token, not the
-    // refresh result. The generation counter guard must have forced
-    // the refresh arm to discard its stale write-back.
+    // refresh result: the re-login on disk must have forced the
+    // refresh arm to discard its write-back.
     let listed = store.list().await;
     assert_eq!(listed.len(), 1, "exactly one provider in cache");
     let in_memory_tok = listed[0].1.access_token.expose().to_string();

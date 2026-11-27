@@ -5637,8 +5637,11 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   command, `relogin: Option<DefinitiveCause>`},
   `refresh_if_due(provider, label)` -> `RefreshOutcome` {NotDue,
   Refreshed, Transient, Definitive(`DefinitiveCause` NotLoggedIn / Revoked)}
-  for the background seat driver, `refresh_under_lock` (near-expiry 300s lead + 401-recovery +
-  reload-generation guard), `reload_from_disk` (returns the seat keys whose
+  for the background seat driver, `refresh_under_lock` (near-expiry 300s lead + 401-recovery; the commit
+  drops the rotation only when the seat's disk record holds another grant
+  or is gone, via `same_grant`, and keeps the seat's locally kept fields
+  via `with_local_fields`), `reload_from_disk` (takes the cache write
+  guard before the disk read; returns the seat keys whose
   stored record the reload added, removed or changed, via `changed_seats`;
   key strings only), transient-failure cooldown
   bookkeeping, and the transient-vs-terminal error classifier

@@ -152,6 +152,8 @@ impl OAuthStore {
                 refresh_cooldowns: std::sync::Mutex::new(BTreeMap::new()),
                 refresh_flow: Some(flow),
                 now_override: AtomicU64::new(0),
+                #[cfg(test)]
+                reload_read_gate: None,
             }),
         })
     }

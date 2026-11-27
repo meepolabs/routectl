@@ -228,6 +228,16 @@ pub(super) async fn open_with_flow<P: Into<PathBuf>>(
     path: P,
     flow: Arc<dyn OAuthFlow>,
 ) -> OAuthStore {
+    open_with_flow_and_reload_gate(path, flow, None).await
+}
+
+/// [`open_with_flow`] whose `reload_from_disk` parks on `reload_read_gate`
+/// between its disk read and its cache swap.
+pub(super) async fn open_with_flow_and_reload_gate<P: Into<PathBuf>>(
+    path: P,
+    flow: Arc<dyn OAuthFlow>,
+    reload_read_gate: Option<Arc<ParkGate>>,
+) -> OAuthStore {
     let path: PathBuf = path.into();
     let cf = file_io::load(&path).await.unwrap();
     // Bare reqwest client: the injected `OAuthFlow` is a fake that
@@ -247,6 +257,7 @@ pub(super) async fn open_with_flow<P: Into<PathBuf>>(
             refresh_cooldowns: std::sync::Mutex::new(BTreeMap::new()),
             refresh_flow: Some(flow),
             now_override: std::sync::atomic::AtomicU64::new(0),
+            reload_read_gate,
         }),
     }
 }
@@ -318,5 +329,104 @@ pub(super) fn anthropic_ref() -> SecretRef {
     SecretRef::OAuth {
         provider: "anthropic".into(),
         label: None,
+    }
+}
+
+/// A one-shot rendezvous between a parked task and the test driving it.
+/// `park` announces arrival and blocks until `release`; both sides keep a
+/// stored permit, so neither order of arrival loses a wakeup.
+#[derive(Default)]
+pub(super) struct ParkGate {
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl ParkGate {
+    pub(super) async fn park(&self) {
+        self.reached.notify_one();
+        self.release.notified().await;
+    }
+
+    pub(super) async fn wait_reached(&self) {
+        self.reached.notified().await;
+    }
+
+    pub(super) fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
+/// A seat record with a distinct refresh token, so a test can tell which
+/// incarnation of the credential ended up stored.
+pub(super) fn seat_rec(access: &str, refresh: &str, expires_at: u64) -> TokenRecord {
+    TokenRecord {
+        refresh_token: SecretToken::new(refresh),
+        ..rec_named(access, expires_at)
+    }
+}
+
+/// Token endpoint stand-in that rotates whatever refresh token it is
+/// given (`<rt>` -> access `<rt>-access`, refresh `<rt>-rotated`) and
+/// parks on `gate` while serving the one refresh token `park_on`, so a
+/// test can run other store operations while that POST is in flight.
+pub(super) struct ParkedFlow {
+    park_on: String,
+    gate: Arc<ParkGate>,
+}
+
+impl ParkedFlow {
+    pub(super) fn new(park_on: &str, gate: Arc<ParkGate>) -> Self {
+        Self {
+            park_on: park_on.to_string(),
+            gate,
+        }
+    }
+
+    pub(super) fn rotated_access(refresh: &str) -> String {
+        format!("{refresh}-access")
+    }
+
+    pub(super) fn rotated_refresh(refresh: &str) -> String {
+        format!("{refresh}-rotated")
+    }
+}
+
+#[async_trait]
+impl OAuthFlow for ParkedFlow {
+    fn provider_id(&self) -> &'static str {
+        "anthropic"
+    }
+    fn display_name(&self) -> &'static str {
+        "Test (parked)"
+    }
+    fn auth_url(&self, _p: &AuthParams<'_>) -> url::Url {
+        unimplemented!("auth_url unused in refresh tests")
+    }
+    fn manual_redirect_url(&self) -> &'static str {
+        "https://example.invalid/callback"
+    }
+    async fn exchange_code(
+        &self,
+        _http: &reqwest::Client,
+        _code: &str,
+        _verifier: &str,
+        _state: &str,
+        _redirect_uri: &str,
+    ) -> OAuthResult<TokenRecord> {
+        unimplemented!("exchange_code unused in refresh tests")
+    }
+    async fn refresh_token(
+        &self,
+        _http: &reqwest::Client,
+        refresh_token: &str,
+    ) -> OAuthResult<TokenRecord> {
+        if refresh_token == self.park_on {
+            self.gate.park().await;
+        }
+        Ok(seat_rec(
+            &Self::rotated_access(refresh_token),
+            &Self::rotated_refresh(refresh_token),
+            unix_now() + 3600,
+        ))
     }
 }
