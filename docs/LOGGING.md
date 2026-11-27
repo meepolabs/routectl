@@ -248,9 +248,15 @@ rather than tailing live.
 For sensitive environments where TRACE is needed but raw prompts are
 not OK to disk, set `ROUTECTL_LOG_REDACT_PROMPTS=1` BEFORE launching
 routectl. The redactor walks every traced body and replaces known
-prompt-bearing fields (text blocks, system, instructions, tool_use
-input, function_call arguments, refusal blocks, image source data,
-image_url data URIs, reasoning-replay carry blobs
+prompt-bearing fields (text blocks, system, instructions, the
+`input` of `tool_use`, `server_tool_use` and `mcp_tool_use` blocks,
+function_call arguments (string or object), custom_tool_call input,
+local_shell_call `command` / `working_directory` / `env`,
+web_search_call `query` / `queries` / `pattern` / `url`,
+image_generation_call `revised_prompt` / `result`, code-execution
+`stdout` / `stderr`, web_search_result `title`, Gemini
+`functionCall.args` and `functionResponse.response`, refusal blocks,
+image source data, image_url data URIs, reasoning-replay carry blobs
 (`encrypted_content` and the `redacted_thinking` `data` blob), Bedrock
 Converse `toolUse.input` and
 `toolResult.content[*].json`) with `<redacted len=N>` placeholders

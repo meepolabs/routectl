@@ -975,14 +975,17 @@ fn redact_value(v: &mut serde_json::Value) {
             redact_credential_fields(map);
             // Whole-object replacements first.
             //
-            // Anthropic-shape tool_use parts carry user-supplied tool
-            // inputs; collapse the entire `input` object to an opaque
-            // marker rather than walking it.
-            if map.get("type").and_then(|t| t.as_str()) == Some("tool_use")
-                && let Some(input) = map.get_mut("input")
+            // Anthropic-shape tool_use parts (client, server and MCP tool
+            // calls) carry user-supplied tool inputs; collapse the entire
+            // `input` object to an opaque marker rather than walking it.
+            if matches!(
+                map.get("type").and_then(|t| t.as_str()),
+                Some("tool_use" | "server_tool_use" | "mcp_tool_use")
+            ) && let Some(input) = map.get_mut("input")
             {
                 *input = redacted_object();
             }
+            redact_tool_item_fields(map);
             // Bedrock Converse uses a different wire shape -- the tool
             // call is `{"toolUse": {"toolUseId":..., "name":...,
             // "input": <Value>}}` with no `type` key on the parent.
@@ -1102,8 +1105,12 @@ fn redact_value(v: &mut serde_json::Value) {
             // of length (titles are short, so the length-only `data`/`url`
             // threshold would let them through). The document `source` is
             // covered by the `data`/`url` arms on recursion.
-            if map.get("type").and_then(|t| t.as_str()) == Some("document")
-                && let Some(title) = map.get_mut("title")
+            // An Anthropic `web_search_result` title is the found page's
+            // title, which echoes what the model searched for.
+            if matches!(
+                map.get("type").and_then(|t| t.as_str()),
+                Some("document" | "web_search_result")
+            ) && let Some(title) = map.get_mut("title")
             {
                 redact_long_string_leaf(title, 0);
             }
@@ -1140,11 +1147,16 @@ fn redact_value(v: &mut serde_json::Value) {
                     // the OpenAI Responses `refusal` block where the
                     // safety reason echoes prompt-derived content, and an
                     // audio block's `transcript` (the spoken-content
-                    // transcription is user content by nature).
-                    "text" | "thinking" | "instructions" | "reasoning" | "arguments"
-                    | "refusal" | "transcript" => {
+                    // transcription is user content by nature), and the
+                    // `stdout` / `stderr` of an Anthropic code-execution
+                    // result.
+                    "text" | "thinking" | "instructions" | "reasoning" | "refusal"
+                    | "transcript" | "stdout" | "stderr" => {
                         redact_string_or_recurse(entry);
                     }
+                    // A tool call's arguments: a JSON-encoded string, or an
+                    // already-parsed object from an upstream that sends one.
+                    "arguments" => redact_tool_payload(entry),
                     // `system` and `content` can be string OR array of
                     // parts. Redact at leaf when string; recurse when
                     // structured (covers Anthropic system blocks +
@@ -1245,6 +1257,72 @@ fn redact_value(v: &mut serde_json::Value) {
                     _ => redact_value(entry),
                 }
             }
+        }
+        _ => {}
+    }
+}
+
+/// Model-written text on tool-call items whose keys the per-key sweep in
+/// [`redact_value`] does not cover, keyed off the item's `type` (Responses
+/// items) or its parent key (Gemini parts, which carry no `type`). Ids,
+/// names, statuses and an action's `type` stay visible.
+fn redact_tool_item_fields(map: &mut serde_json::Map<String, serde_json::Value>) {
+    match map.get("type").and_then(serde_json::Value::as_str) {
+        // The generic `input` key also names the Responses request's
+        // top-level item list, so this is gated on the item `type`.
+        Some("custom_tool_call") => {
+            if let Some(input) = map.get_mut("input") {
+                redact_tool_payload(input);
+            }
+        }
+        Some("local_shell_call") => {
+            if let Some(action) = map.get_mut("action").and_then(|a| a.as_object_mut()) {
+                redact_keys(action, &["command", "working_directory"]);
+                if let Some(env) = action.get_mut("env") {
+                    *env = redacted_object();
+                }
+            }
+        }
+        // `url` too: an opened page's address can carry the query.
+        Some("web_search_call") => {
+            if let Some(action) = map.get_mut("action").and_then(|a| a.as_object_mut()) {
+                redact_keys(action, &["query", "queries", "pattern", "url"]);
+            }
+        }
+        Some("image_generation_call") => redact_keys(map, &["revised_prompt", "result"]),
+        _ => {}
+    }
+    if let Some(call) = map.get_mut("functionCall").and_then(|c| c.as_object_mut())
+        && let Some(args) = call.get_mut("args")
+    {
+        redact_tool_payload(args);
+    }
+    if let Some(reply) = map
+        .get_mut("functionResponse")
+        .and_then(|r| r.as_object_mut())
+        && let Some(response) = reply.get_mut("response")
+    {
+        redact_tool_payload(response);
+    }
+}
+
+/// [`redact_string_or_recurse`] on each of `keys` present in `map`.
+fn redact_keys(map: &mut serde_json::Map<String, serde_json::Value>, keys: &[&str]) {
+    for key in keys {
+        if let Some(entry) = map.get_mut(*key) {
+            redact_string_or_recurse(entry);
+        }
+    }
+}
+
+/// A tool call's model-written payload: a string becomes
+/// `<redacted len=N>`, and a structured value collapses whole to the opaque
+/// marker, as `tool_use.input` does, since its keys are model-written too.
+fn redact_tool_payload(entry: &mut serde_json::Value) {
+    match entry {
+        serde_json::Value::String(_) => redact_string_or_recurse(entry),
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+            *entry = redacted_object();
         }
         _ => {}
     }

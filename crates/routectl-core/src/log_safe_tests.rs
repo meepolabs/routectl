@@ -772,6 +772,254 @@ fn redact_openai_responses_response_body_output_array_recurses() {
 }
 
 #[test]
+fn redact_custom_tool_call_input_on_request_and_response_items() {
+    // A Responses `custom_tool_call` carries the model-written tool input
+    // (e.g. code-mode `exec` source) as a free-form string under `input`.
+    // It redacts like a function_call's `arguments`; the item's
+    // structural keys stay so the trace still names the call.
+    const SENTINEL: &str = "SENTINEL_CUSTOM_TOOL_INPUT";
+    let item = json!({
+        "type": "custom_tool_call",
+        "call_id": "ctc_1",
+        "name": "exec",
+        "input": SENTINEL,
+    });
+    let cases = [
+        (
+            "request input[] item",
+            "input",
+            json!({"input": [item.clone()]}),
+        ),
+        (
+            "response output[] item",
+            "output",
+            json!({"output": [item]}),
+        ),
+    ];
+    let mut leaked = Vec::new();
+    for (row, list_key, body) in cases {
+        // Control: with redaction off the fixture surfaces the sentinel.
+        let off = redact_prompts_with_flag(&body, false);
+        assert_eq!(off[list_key][0]["input"], SENTINEL, "{row}: control");
+
+        let on = redact_prompts_with_flag(&body, true);
+        let redacted = &on[list_key][0];
+        if on.to_string().contains(SENTINEL) {
+            leaked.push(format!("{row}: {on}"));
+            continue;
+        }
+        assert_eq!(
+            redacted["input"],
+            format!("<redacted len={}>", SENTINEL.len()),
+            "{row}"
+        );
+        assert_eq!(redacted["type"], "custom_tool_call", "{row}");
+        assert_eq!(redacted["call_id"], "ctc_1", "{row}");
+        assert_eq!(redacted["name"], "exec", "{row}");
+    }
+    assert!(
+        leaked.is_empty(),
+        "custom_tool_call input leaked: {leaked:#?}"
+    );
+}
+
+/// Every string a row plants under a model- or user-written key holds
+/// this marker, so one substring check covers the whole row.
+const TOOL_TEXT_SENTINEL: &str = "SENTINEL_TOOL_TEXT";
+
+/// A structural member that must stay visible: (JSON pointer, value).
+type KeptMember = (&'static str, serde_json::Value);
+
+/// One wire shape whose model- or user-written fields must redact: row
+/// name, body, and the structural members that must stay visible.
+fn tool_text_cases() -> Vec<(&'static str, serde_json::Value, Vec<KeptMember>)> {
+    let s = TOOL_TEXT_SENTINEL;
+    vec![
+        (
+            "responses local_shell_call action",
+            json!({"output": [{"type": "local_shell_call", "id": "lsc_1", "call_id": "call_1",
+                "status": "completed", "action": {"type": "exec",
+                "command": ["bash", "-lc", format!("cat {s}")], "timeout_ms": 1000,
+                "working_directory": format!("/work/{s}"), "env": {s: s}}}]}),
+            vec![
+                ("/output/0/type", json!("local_shell_call")),
+                ("/output/0/id", json!("lsc_1")),
+                ("/output/0/call_id", json!("call_1")),
+                ("/output/0/status", json!("completed")),
+                ("/output/0/action/type", json!("exec")),
+                ("/output/0/action/timeout_ms", json!(1000)),
+            ],
+        ),
+        (
+            "responses web_search_call search",
+            json!({"output": [{"type": "web_search_call", "id": "ws_1", "status": "completed",
+                "action": {"type": "search", "query": s, "queries": [s]}}]}),
+            vec![
+                ("/output/0/type", json!("web_search_call")),
+                ("/output/0/id", json!("ws_1")),
+                ("/output/0/status", json!("completed")),
+                ("/output/0/action/type", json!("search")),
+            ],
+        ),
+        (
+            "responses web_search_call open_page",
+            json!({"input": [{"type": "web_search_call", "id": "ws_2", "status": "completed",
+                "action": {"type": "open_page", "url": format!("https://example.com/?q={s}")}}]}),
+            vec![
+                ("/input/0/id", json!("ws_2")),
+                ("/input/0/action/type", json!("open_page")),
+            ],
+        ),
+        (
+            "responses web_search_call find_in_page",
+            json!({"output": [{"type": "web_search_call", "id": "ws_3", "status": "completed",
+                "action": {"type": "find_in_page", "url": format!("https://example.com/{s}"),
+                "pattern": s}}]}),
+            vec![
+                ("/output/0/id", json!("ws_3")),
+                ("/output/0/action/type", json!("find_in_page")),
+            ],
+        ),
+        (
+            "responses image_generation_call",
+            json!({"output": [{"type": "image_generation_call", "id": "ig_1", "status": "completed",
+                "revised_prompt": s, "result": format!("{s}QUJDRA==")}]}),
+            vec![
+                ("/output/0/type", json!("image_generation_call")),
+                ("/output/0/id", json!("ig_1")),
+                ("/output/0/status", json!("completed")),
+            ],
+        ),
+        (
+            "responses tool_search_call object arguments",
+            json!({"input": [{"type": "tool_search_call", "call_id": "call_2", "status": "completed",
+                "execution": "client", "arguments": {"query": s, "limit": 5}}]}),
+            vec![
+                ("/input/0/type", json!("tool_search_call")),
+                ("/input/0/call_id", json!("call_2")),
+                ("/input/0/execution", json!("client")),
+            ],
+        ),
+        (
+            "chat tool_calls object function.arguments",
+            json!({"messages": [{"role": "assistant", "content": null, "tool_calls": [
+                {"id": "call_3", "type": "function", "function": {"name": "lookup",
+                 "arguments": {"city": s, "nested": {"note": s}}}}]}]}),
+            vec![
+                ("/messages/0/tool_calls/0/id", json!("call_3")),
+                ("/messages/0/tool_calls/0/function/name", json!("lookup")),
+            ],
+        ),
+        (
+            "responses custom_tool_call object input",
+            json!({"input": [{"type": "custom_tool_call", "call_id": "ctc_2", "name": "exec",
+                "input": {"code": s}}]}),
+            vec![
+                ("/input/0/type", json!("custom_tool_call")),
+                ("/input/0/call_id", json!("ctc_2")),
+                ("/input/0/name", json!("exec")),
+            ],
+        ),
+        (
+            "anthropic server_tool_use input",
+            json!({"messages": [{"role": "assistant", "content": [{"type": "server_tool_use",
+                "id": "srvtoolu_1", "name": "web_search", "input": {"query": s}}]}]}),
+            vec![
+                ("/messages/0/content/0/type", json!("server_tool_use")),
+                ("/messages/0/content/0/id", json!("srvtoolu_1")),
+                ("/messages/0/content/0/name", json!("web_search")),
+            ],
+        ),
+        (
+            "anthropic mcp_tool_use input",
+            json!({"content": [{"type": "mcp_tool_use", "id": "mcptoolu_1", "name": "search",
+                "server_name": "docs", "input": {"q": s}}]}),
+            vec![
+                ("/content/0/type", json!("mcp_tool_use")),
+                ("/content/0/id", json!("mcptoolu_1")),
+                ("/content/0/name", json!("search")),
+                ("/content/0/server_name", json!("docs")),
+            ],
+        ),
+        (
+            "anthropic code_execution_tool_result",
+            json!({"content": [{"type": "code_execution_tool_result", "tool_use_id": "srvtoolu_2",
+                "content": {"type": "code_execution_result", "stdout": s, "stderr": s,
+                "return_code": 0, "content": []}}]}),
+            vec![
+                ("/content/0/tool_use_id", json!("srvtoolu_2")),
+                ("/content/0/content/type", json!("code_execution_result")),
+                ("/content/0/content/return_code", json!(0)),
+            ],
+        ),
+        (
+            "anthropic bash_code_execution_tool_result",
+            json!({"content": [{"type": "bash_code_execution_tool_result", "tool_use_id": "srvtoolu_3",
+                "content": {"type": "bash_code_execution_result", "stdout": s, "stderr": s,
+                "return_code": 1, "content": []}}]}),
+            vec![
+                ("/content/0/tool_use_id", json!("srvtoolu_3")),
+                (
+                    "/content/0/content/type",
+                    json!("bash_code_execution_result"),
+                ),
+                ("/content/0/content/return_code", json!(1)),
+            ],
+        ),
+        (
+            "anthropic web_search_result title",
+            json!({"content": [{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_4",
+                "content": [{"type": "web_search_result", "title": s,
+                "url": "https://example.com/page", "encrypted_content": "e", "page_age": "1d"}]}]}),
+            vec![
+                ("/content/0/tool_use_id", json!("srvtoolu_4")),
+                ("/content/0/content/0/type", json!("web_search_result")),
+                (
+                    "/content/0/content/0/url",
+                    json!("https://example.com/page"),
+                ),
+            ],
+        ),
+        (
+            "gemini functionCall args",
+            json!({"contents": [{"role": "model", "parts": [
+                {"functionCall": {"name": "lookup", "args": {"city": s}}}]}]}),
+            vec![
+                ("/contents/0/role", json!("model")),
+                ("/contents/0/parts/0/functionCall/name", json!("lookup")),
+            ],
+        ),
+        (
+            "gemini functionResponse response",
+            json!({"contents": [{"role": "user", "parts": [
+                {"functionResponse": {"name": "lookup", "response": {"result": s}}}]}]}),
+            vec![("/contents/0/parts/0/functionResponse/name", json!("lookup"))],
+        ),
+    ]
+}
+
+#[test]
+fn redact_tool_call_text_across_item_kinds_keeps_structural_keys() {
+    let mut failures = Vec::new();
+    for (row, body, structural) in tool_text_cases() {
+        // Control: with redaction off the fixture surfaces the sentinel.
+        let off = redact_prompts_with_flag(&body, false).to_string();
+        assert!(off.contains(TOOL_TEXT_SENTINEL), "{row}: control");
+
+        let on = redact_prompts_with_flag(&body, true);
+        if on.to_string().contains(TOOL_TEXT_SENTINEL) {
+            failures.push(format!("{row}: leaked: {on}"));
+        }
+        for (pointer, expected) in structural {
+            if on.pointer(pointer) != Some(&expected) {
+                failures.push(format!("{row}: {pointer} != {expected}: {on}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
 fn redact_metadata_collapses_whole_object_when_on_verbatim_when_off() {
     // `metadata` is a caller-supplied free-form key/value bag preserved
     // verbatim end-to-end (ingress parse -> egress wire). The named-arm
