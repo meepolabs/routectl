@@ -10,6 +10,8 @@ const LAYOUT_DRIVER: &str = include_str!("page_browser_layout_driver.js");
 
 const LAYOUT_BUDGET_MS: u64 = 40_000;
 
+const VERDICT_OUTAGE_BUDGET_MS: u64 = 90_000;
+
 /// The views whose figures the checks read, each at the address that shows
 /// its densest content.
 const VIEWS: &[(&str, &str)] = &[
@@ -47,11 +49,16 @@ const FLOOR: Setup = Setup {
 };
 
 fn run_layout(setup: &Setup, hash: &'static str) -> Value {
+    run_in_setup(setup, "layout-check", hash, LAYOUT_BUDGET_MS)
+}
+
+/// One driver scenario in the setup's window and text size.
+fn run_in_setup(setup: &Setup, name: &'static str, hash: &'static str, budget_ms: u64) -> Value {
     let scenario = browser::Scenario {
-        name: "layout-check",
+        name,
         hash,
         snippets: &[LAYOUT_DRIVER],
-        budget_ms: LAYOUT_BUDGET_MS,
+        budget_ms,
     };
     let window = format!("--window-size={},900", setup.width);
     let preferences = json!({ "webkit": { "webprefs": { "default_font_size": setup.font_px } } });
@@ -211,15 +218,12 @@ fn page_browser_figures_read_in_full_at_the_narrow_floor() {
 }
 
 fn run_verdict_outage(setup: &Setup) -> Value {
-    let scenario = browser::Scenario {
-        name: "layout-verdict-outage",
-        hash: "now",
-        snippets: &[LAYOUT_DRIVER],
-        budget_ms: 90_000,
-    };
-    let window = format!("--window-size={},900", setup.width);
-    let preferences = json!({ "webkit": { "webprefs": { "default_font_size": setup.font_px } } });
-    browser::run_scenario_in_profile(&scenario, &[&window], &preferences).result
+    run_in_setup(
+        setup,
+        "layout-verdict-outage",
+        "now",
+        VERDICT_OUTAGE_BUDGET_MS,
+    )
 }
 
 /// Through an outage the strip alone says the daemon cannot be reached (no

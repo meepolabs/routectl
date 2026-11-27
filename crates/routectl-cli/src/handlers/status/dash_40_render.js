@@ -547,11 +547,8 @@
     sk.className = 'skeleton';
     sk.setAttribute('aria-hidden', 'true');
     for (var i = 0; i < 3; i++) { sk.appendChild(document.createElement('span')); }
-    var sr = document.createElement('span');
-    sr.className = 'sr-only';
-    sr.textContent = 'Loading';
     card.appendChild(sk);
-    card.appendChild(sr);
+    card.appendChild(srOnlyText('Loading'));
     return card;
   }
 

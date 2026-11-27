@@ -584,19 +584,60 @@ fn page_browser_traffic_every_detail_value_sits_beside_its_label() {
     }
 }
 
-/// A chain line reads like a label:value pair: at 720 and at 1440, a glob
-/// step whose hint is long enough to wrap keeps its name, its hint and its
-/// count beside its label, wrapping inside the value column, never under
-/// the label. Positive control: at 720 the glob step's value really spans
-/// more than one line.
-///
-/// Mutation check: give `.traffic-step` `display: flex; flex-wrap: wrap`
-/// again with the parts as its own children (chainLine appending them to
-/// the line, not to `.traffic-stepvalue`) -> red at 720 (the hint or the
-/// count starts under `Step 1`).
-#[test]
-#[ignore = "drives a system headless Chrome"]
-fn page_browser_traffic_every_chain_step_value_sits_beside_its_label() {
+/// One window size and default text size a chain-layout check runs at.
+struct ChainSetup {
+    name: &'static str,
+    window: &'static str,
+    font_px: u32,
+}
+
+const CHAIN_SETUPS: [ChainSetup; 3] = [
+    ChainSetup {
+        name: "1440 px, default text",
+        window: "--window-size=1440,987",
+        font_px: 16,
+    },
+    ChainSetup {
+        name: "720 px, default text",
+        window: "--window-size=720,987",
+        font_px: 16,
+    },
+    ChainSetup {
+        name: "1440 px, 200% text",
+        window: "--window-size=1440,987",
+        font_px: 32,
+    },
+];
+
+/// The `traffic-detail` run of `label`'s alias row at `setup`. Positive
+/// control: the page ran at the setup's text size.
+fn chain_detail_at(setup: &ChainSetup, answer: &Value, label: &str) -> Value {
+    let preferences = json!({ "webkit": { "webprefs": { "default_font_size": setup.font_px } } });
+    let out = browser::run_scenario_in_profile(
+        &traffic_scenario(
+            "traffic-detail",
+            "traffic?group=alias",
+            &[
+                ("routectlTrafficAnswers", json!({ "alias": answer })),
+                ("routectlTrafficRow", json!(label)),
+                ("routectlTrafficRowKey", json!(format!("k{label}"))),
+            ],
+        ),
+        &[setup.window],
+        &preferences,
+    )
+    .result;
+    assert_eq!(
+        out["root_font_px"].as_f64(),
+        Some(f64::from(setup.font_px)),
+        "{}: {out:#}",
+        setup.name
+    );
+    out
+}
+
+/// The `wide` alias group over a long glob step, served at today's range.
+fn long_glob_answer() -> Value {
     let mut config = glob_alias_config();
     let chain = |steps: &[&str]| {
         routectl_router::AliasValue::Chain(steps.iter().map(|s| (*s).to_owned()).collect())
@@ -616,38 +657,46 @@ fn page_browser_traffic_every_chain_step_value_sits_beside_its_label() {
     .into_iter()
     .map(|(id, model, provider)| (id, 1, "wide", Some(model), Some(provider), None, "ok", None))
     .collect();
-    let answer = served_answer(
+    served_answer(
         config,
         &seeds,
         &json!({"window": "today", "group_by": "alias"}),
-    );
+    )
+}
 
-    for width in ["--window-size=1440,987", "--window-size=720,987"] {
-        let out = browser::run_scenario_with(
-            &traffic_scenario(
-                "traffic-detail",
-                "traffic?group=alias",
-                &[
-                    ("routectlTrafficAnswers", json!({ "alias": answer.clone() })),
-                    ("routectlTrafficRow", json!("wide")),
-                    ("routectlTrafficRowKey", json!("kwide")),
-                ],
-            ),
-            &[width],
-        )
-        .result;
+fn box_edge(b: &Value, k: &str) -> f64 {
+    b[k].as_f64().expect("a box edge")
+}
+
+/// A chain line reads like a label:value pair: at 720 and at 1440, and at
+/// 1440 with the text doubled, a glob step whose hint is long enough to
+/// wrap keeps its name, its hint and its count beside its label, wrapping
+/// inside the value column, never under the label. Positive control: at 720
+/// the glob step's value really spans more than one line.
+///
+/// Mutation check: give `.traffic-step` `display: flex; flex-wrap: wrap`
+/// again with the parts as its own children (chainLine appending them to
+/// the line, not to `.traffic-stepvalue`) -> red at 720 (the hint or the
+/// count starts under `Step 1`).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_traffic_every_chain_step_value_sits_beside_its_label() {
+    let answer = long_glob_answer();
+
+    for setup in &CHAIN_SETUPS {
+        let at = setup.name;
+        let out = chain_detail_at(setup, &answer, "wide");
 
         let lines = block_lines(&out, "chain");
-        let f = |b: &Value, k: &str| b[k].as_f64().expect("a box edge");
         let glob = &lines[0];
         assert_eq!(
             glob["hint"], "(matches any model name starting with claude-sonnet-long-family)",
-            "{width}: {out:#}"
+            "{at}: {out:#}"
         );
-        if width.contains("720") {
+        if setup.window.contains("720") {
             let parts = &glob["part_boxes"];
             assert!(
-                f(&parts["count"], "top") > f(&parts["name"], "top") + 4.0,
+                box_edge(&parts["count"], "top") > box_edge(&parts["name"], "top") + 4.0,
                 "positive control: the glob step's value wraps at 720: {glob:#}"
             );
         }
@@ -657,16 +706,62 @@ fn page_browser_traffic_every_chain_step_value_sits_beside_its_label() {
             let mut first_top = f64::INFINITY;
             for (part, part_box) in parts.iter().filter(|(_, b)| !b.is_null()) {
                 assert!(
-                    f(part_box, "left") >= f(label, "right"),
-                    "{width}: `{}` {part} starts left of its label's end: {line:#}",
+                    box_edge(part_box, "left") >= box_edge(label, "right"),
+                    "{at}: `{}` {part} starts left of its label's end: {line:#}",
                     line["label"]
                 );
-                first_top = first_top.min(f(part_box, "top"));
+                first_top = first_top.min(box_edge(part_box, "top"));
             }
             assert!(
-                (first_top - f(label, "top")).abs() < 4.0,
-                "{width}: `{}` value does not start on its label's line: {line:#}",
+                (first_top - box_edge(label, "top")).abs() < 4.0,
+                "{at}: `{}` value does not start on its label's line: {line:#}",
                 line["label"]
+            );
+        }
+    }
+}
+
+/// An alias that resolves to no chain draws one unlabeled line saying so,
+/// and that message takes the whole line rather than the label column: at
+/// 720 and at 1440, and at 1440 with the text doubled, its value starts at
+/// the line's left edge and ends at its right edge. Positive control: the
+/// line has no label and reads the no-chain message.
+///
+/// Mutation check: drop the `.traffic-stepvalue:only-child` rule -> red
+/// (the message stops a column gap short of the line's end).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_traffic_a_chainless_alias_message_spans_its_line() {
+    let mut answer = long_glob_answer();
+    let groups = answer["data"]["groups"].as_array_mut().expect("groups");
+    let wide = groups
+        .iter_mut()
+        .find(|g| g["label"] == "wide")
+        .expect("a `wide` group");
+    let stepped: i64 = wide["steps"]
+        .as_array()
+        .expect("server steps")
+        .iter()
+        .map(|s| s["requests"].as_i64().expect("step requests"))
+        .sum();
+    wide["off_chain"] = json!(wide["off_chain"].as_i64().unwrap_or(0) + stepped);
+    wide["steps"] = json!([]);
+
+    for setup in &CHAIN_SETUPS {
+        let at = setup.name;
+        let out = chain_detail_at(setup, &answer, "wide");
+
+        let message = &block_lines(&out, "chain")[0];
+        assert_eq!(message["label"], Value::Null, "{at}: {message:#}");
+        assert_eq!(
+            message["name"], "this name resolves to no configured chain",
+            "{at}: {message:#}"
+        );
+        let (line, value) = (&message["line_box"], &message["value_box"]);
+        for edge in ["left", "right"] {
+            assert!(
+                (box_edge(value, edge) - box_edge(line, edge)).abs() < 1.0,
+                "{at}: the message's {edge} edge is not the line's: {message:#}"
             );
         }
     }

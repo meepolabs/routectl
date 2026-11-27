@@ -22,14 +22,7 @@ const SPARK_BASELINE_Y: f64 = 22.0;
 const BUCKET_STEP_X: f64 = SPARK_WIDTH / 5.0;
 
 fn run(name: &'static str) -> Vec<Value> {
-    let scenario = browser::Scenario {
-        name,
-        hash: "now",
-        snippets: &[TILES_DRIVER],
-        budget_ms: TILES_BUDGET_MS,
-    };
-    browser::run_scenario(&scenario)
-        .result
+    run_one(name)
         .as_array()
         .expect("one observation per round")
         .clone()

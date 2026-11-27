@@ -171,22 +171,18 @@ fn looks_pressed(button: &Value) -> bool {
     button["shadow"] != "none"
 }
 
-fn pressed_windows(buttons: &Value) -> Vec<&str> {
-    buttons
-        .as_array()
-        .expect("picker buttons")
-        .iter()
-        .filter(|b| b["pressed"] == "true")
-        .map(|b| b["window"].as_str().expect("a window id"))
-        .collect()
+/// The pressed state of one picker button, read from its attribute.
+fn has_pressed_attribute(button: &Value) -> bool {
+    button["pressed"] == "true"
 }
 
-fn pressed_looks(buttons: &Value) -> Vec<&str> {
+/// The windows of the picker buttons `is_pressed` holds for.
+fn pressed_windows(buttons: &Value, is_pressed: fn(&Value) -> bool) -> Vec<&str> {
     buttons
         .as_array()
         .expect("picker buttons")
         .iter()
-        .filter(|b| looks_pressed(b))
+        .filter(|b| is_pressed(b))
         .map(|b| b["window"].as_str().expect("a window id"))
         .collect()
 }
@@ -205,12 +201,26 @@ fn page_browser_a_windowless_view_shows_no_range_pressed_and_keeps_it() {
         browser::run_scenario(&views_scenario("view-range-across-windowless", "traffic")).result;
 
     for side in ["traffic", "back"] {
-        assert_eq!(pressed_windows(&out[side]), ["week"], "{side}: {out:#}");
-        assert_eq!(pressed_looks(&out[side]), ["week"], "{side}: {out:#}");
+        assert_eq!(
+            pressed_windows(&out[side], has_pressed_attribute),
+            ["week"],
+            "{side}: {out:#}"
+        );
+        assert_eq!(
+            pressed_windows(&out[side], looks_pressed),
+            ["week"],
+            "{side}: {out:#}"
+        );
     }
     assert_eq!(out["models_picker"]["windowless"], "true", "{out:#}");
-    assert!(pressed_windows(&out["models"]).is_empty(), "{out:#}");
-    assert!(pressed_looks(&out["models"]).is_empty(), "{out:#}");
+    assert!(
+        pressed_windows(&out["models"], has_pressed_attribute).is_empty(),
+        "{out:#}"
+    );
+    assert!(
+        pressed_windows(&out["models"], looks_pressed).is_empty(),
+        "{out:#}"
+    );
     let backgrounds: std::collections::BTreeSet<&str> = out["models"]
         .as_array()
         .expect("picker buttons")

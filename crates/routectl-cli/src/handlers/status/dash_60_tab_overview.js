@@ -26,7 +26,6 @@
   // The two timing columns are read over different requests, so a failing
   // group's latency can sit under its time to first token.
   var TTFT_POPULATION = 'over streamed successes';
-  var LATENCY_POPULATION = 'over every request, failures included';
 
   // A partial group with no priced row at all mixes subscription and
   // unpriced rows: there is no subtotal to show.
@@ -854,13 +853,6 @@
     wrap.appendChild(srOnlyText(' '));
     wrap.appendChild(mark);
     return wrap;
-  }
-
-  function srOnlyText(text) {
-    var span = document.createElement('span');
-    span.className = 'sr-only';
-    span.textContent = text;
-    return span;
   }
 
   // An equivalent no subscription row could be priced into: the word, faint,

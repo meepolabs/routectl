@@ -63,6 +63,7 @@
   --col-docpass: 11rem;
   --col-state: 20rem;
   --h-kpi-spark: 34px;
+  --verdict-dot-size: 9px;
 
   --bg: #0d0f12;
   --surface: #15181c;
@@ -226,8 +227,8 @@ body {
   flex: 1 1 auto;
 }
 .verdict-dot {
-  width: 9px;
-  height: 9px;
+  width: var(--verdict-dot-size);
+  height: var(--verdict-dot-size);
   border-radius: 50%;
   flex: none;
   background: var(--faint);
@@ -241,7 +242,7 @@ body {
   letter-spacing: -0.005em;
   color: var(--fg);
   min-width: 0;
-  max-width: calc(100% - 9px - var(--sp-2));
+  max-width: calc(100% - var(--verdict-dot-size) - var(--sp-2));
 }
 /* A last known verdict, shown while no current one is: dimmed, with the
    note saying when it was current and why it is not now. Its sentence is

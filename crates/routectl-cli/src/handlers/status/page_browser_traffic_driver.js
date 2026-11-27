@@ -95,8 +95,8 @@
   }
 
   // One line of a detail block: its label, name, count and share as drawn,
-  // its whole text, the keys it shows, its top offset, and the boxes of its
-  // label and of each part of its value.
+  // its whole text, the keys it shows, its top offset, and the boxes of the
+  // line, its label, its value and each part of its value.
   function blockLine(line) {
     var count = line.querySelector('.traffic-count');
     var figures = count ? count.children : [];
@@ -109,7 +109,9 @@
       text: line.textContent,
       keys: keysIn(line),
       top: line.getBoundingClientRect().top,
+      line_box: box(line),
       label_box: boxIn(line, '.traffic-steplabel'),
+      value_box: boxIn(line, '.traffic-stepvalue'),
       part_boxes: {
         name: boxIn(line, '.traffic-stepname'),
         hint: boxIn(line, '.traffic-stephint'),
@@ -275,6 +277,7 @@
         label: rowLabel(row),
         wanted: label,
         requests: parseInt(row.querySelector('td.num').textContent, 10),
+        root_font_px: parseFloat(getComputedStyle(document.documentElement).fontSize),
         detail: detailOf(rowId)
       };
     });

@@ -676,25 +676,35 @@ fn page_browser_models_the_lanes_sit_in_a_card() {
 /// A chip reads plain words for the capability and verdict tokens the panel
 /// sends: a verdict in the word map reads as its words (`broken` ->
 /// `refused`), and any other token reads as itself with its underscores
-/// spaced. The raw tokens stay at the head of the tooltip, and a refusal
-/// keeps its own mark.
+/// spaced: a non-string token reads as its string, and a prefixed token
+/// (a `field` path, a `beta` flag) keeps its prefix. The raw tokens stay at
+/// the head of the tooltip, and a refusal keeps its own mark.
 ///
 /// Mutation checks: render `cell.capability + ' ' + cell.verdict` again in
 /// modelsCapabilities -> red (`forced_tool_choice unknown`); drop the
 /// underscore replacement from modelsSpacedToken -> red (the unknown token
 /// keeps its underscores); drop `broken` from MODELS_VERDICT_WORDS -> red
-/// (`web search: broken`).
+/// (`web search: broken`); drop `String` from modelsSpacedToken -> red (no
+/// `7: works` chip); strip a leading `<word>:` in modelsSpacedToken -> red
+/// (the prefixed chips lose their prefix).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_models_chips_read_plain_words() {
+    // The field prefix is assembled at run time on both sides: the literal
+    // is owned by one router module, and a scan forbids it elsewhere.
     let result = populated(
         "models-rows",
         &[
-            "window.routectlModels = { extraCapability: \
-             { capability: 'next_gen_tool', verdict: 'half_known' } };",
+            "window.routectlModels = { extraCapabilities: [\
+             { capability: 'next_gen_tool', verdict: 'half_known' },\
+             { capability: 7, verdict: 'verified' },\
+             { capability: ['field', 'thinking.budget_tokens'].join(':'), verdict: 'verified' },\
+             { capability: 'beta:context-1m-2025-08-07', verdict: 'suspect' }] };",
             MODELS_DRIVER,
         ],
     );
+    let field_token = ["field", "thinking.budget_tokens"].join(":");
+    let field_text = ["field", "thinking.budget tokens: works"].join(":");
 
     let chips = result["chips"].as_array().expect("chips");
     let chip = |text: &str| {
@@ -710,13 +720,36 @@ fn page_browser_models_chips_read_plain_words() {
             .is_some_and(|t| t.starts_with("forced_tool_choice - unknown, ")),
         "{known:#}"
     );
-    let unknown = chip("next gen tool: half known");
-    assert!(
-        unknown["title"]
-            .as_str()
-            .is_some_and(|t| t.starts_with("next_gen_tool - half_known, ")),
-        "{unknown:#}"
-    );
+    for (case, text, title_head) in [
+        (
+            "an unknown token",
+            "next gen tool: half known",
+            "next_gen_tool - half_known, ".to_owned(),
+        ),
+        (
+            "a non-string token",
+            "7: works",
+            "7 - verified, ".to_owned(),
+        ),
+        (
+            "a field path",
+            field_text.as_str(),
+            format!("{field_token} - verified, "),
+        ),
+        (
+            "a beta flag",
+            "beta:context-1m-2025-08-07: maybe ignored",
+            "beta:context-1m-2025-08-07 - suspect, ".to_owned(),
+        ),
+    ] {
+        let found = chip(text);
+        assert!(
+            found["title"]
+                .as_str()
+                .is_some_and(|t| t.starts_with(&title_head)),
+            "{case}: {found:#}"
+        );
+    }
     let refusal = chips
         .iter()
         .find(|c| {
@@ -744,9 +777,8 @@ fn page_browser_models_chips_read_plain_words() {
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_models_nickname_links_are_light_at_rest() {
-    let result = populated("models-rows", &[MODELS_DRIVER]);
+    let link = populated("models-link-look", &[MODELS_DRIVER]);
 
-    let link = &result["link"];
     assert_eq!(link["cell_weight"], "600", "positive control: {link:#}");
     assert_eq!(link["weight"], "400", "{link:#}");
     assert_eq!(link["decoration"], "none", "{link:#}");

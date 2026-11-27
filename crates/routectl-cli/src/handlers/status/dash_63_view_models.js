@@ -418,8 +418,9 @@
   }
 
   // Every resolved capability cell: its capability and display verdict in
-  // plain words, the raw tokens, tier and routing action in its tooltip. A cell resolved as unsupported is
-  // marked; a verdict reads as text, never as a color alone.
+  // plain words, the raw tokens, tier and routing action in its tooltip. A
+  // cell resolved as unsupported is marked; a verdict reads as text, never
+  // as a color alone.
   function modelsCapabilities(cells) {
     var wrap = document.createElement('span');
     wrap.className = 'hchips';

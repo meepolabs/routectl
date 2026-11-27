@@ -10,8 +10,8 @@
 //   spanLanes         `[ms, ...]`: add one problem lane per entry, named
 //                     `span-<i>`, whose problem began that long before as_of
 //                     and which no cause line covers
-//   extraCapability   `{capability, verdict}`: add that resolved capability
-//                     cell to every lane
+//   extraCapabilities `[{capability, verdict}, ...]`: add those resolved
+//                     capability cells to every lane
 (function (d) {
   'use strict';
 
@@ -44,27 +44,29 @@
     });
   }
 
-  function addCapability(models) {
+  function addCapabilities(models) {
     models.data.rows.forEach(function (row) {
-      row.capabilities.push({
-        capability: opts.extraCapability.capability,
-        verdict: opts.extraCapability.verdict,
-        supported: null,
-        source: null,
-        layer: null,
-        action: 'none'
+      opts.extraCapabilities.forEach(function (extra) {
+        row.capabilities.push({
+          capability: extra.capability,
+          verdict: extra.verdict,
+          supported: null,
+          source: null,
+          layer: null,
+          action: 'none'
+        });
       });
     });
   }
 
   d.rewrite(function (url, text) {
     if (url.pathname !== '/status' ||
-        !(opts.attentionDown || opts.recoveredLane || opts.spanLanes || opts.extraCapability)) {
+        !(opts.attentionDown || opts.recoveredLane || opts.spanLanes || opts.extraCapabilities)) {
       return text;
     }
     var agg = JSON.parse(text);
     if (opts.spanLanes) { addSpanLanes(agg.panels.models); }
-    if (opts.extraCapability) { addCapability(agg.panels.models); }
+    if (opts.extraCapabilities) { addCapabilities(agg.panels.models); }
     var attention = agg.panels.attention;
     if (opts.attentionDown) {
       agg.panels.attention = {
@@ -167,8 +169,9 @@
   // keyboard focus.
   function linkLook() {
     var link = document.querySelector('#models-lanes .models-link');
+    if (!link) { throw new Error('no nickname link in the lane table'); }
     var rest = getComputedStyle(link);
-    var out = { weight: rest.fontWeight, decoration: rest.textDecorationLine, color: rest.color };
+    var out = { weight: rest.fontWeight, decoration: rest.textDecorationLine };
     link.focus();
     var focused = getComputedStyle(link);
     out.focus_visible = link.matches(':focus-visible');
@@ -187,7 +190,6 @@
       headers: headers(),
       card: cardOf(),
       chips: chips(body),
-      link: linkLook(),
       rows: rows(),
       unused: unused ? textIn(unused, 'summary') : null,
       error_cards: body.querySelectorAll('.unavailable-msg, .incompatible-msg').length,
@@ -308,6 +310,12 @@
       ? ready.then(function () { return d.sleep(3000); })
       : ready.then(lanesQueryAnswered).then(function () { return d.sleep(300); });
     return settled.then(seen);
+  });
+
+  d.scenario('models-link-look', function () {
+    return d.waitUntil('the lane table', lanesDrawn).then(lanesQueryAnswered)
+      .then(function () { return d.sleep(300); })
+      .then(linkLook);
   });
 
   // A lane row expanded, then two changed rounds of its transit count.

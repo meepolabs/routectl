@@ -780,8 +780,8 @@ fn the_stale_text_scan_reports_opacity_and_a_low_contrast_color() {
     );
 }
 
-fn stale_mark_opacity(css: &str, light: bool) -> f64 {
-    resolve(&theme_tokens(css, light), "--stale-mark-opacity")
+fn stale_mark_opacity(tokens: &BTreeMap<String, String>) -> f64 {
+    resolve(tokens, "--stale-mark-opacity")
         .parse()
         .expect("the stale mark opacity is a number")
 }
@@ -796,7 +796,7 @@ fn a_dimmed_stale_meter_fill_keeps_three_to_one() {
     let css = style();
     for light in [false, true] {
         let tokens = theme_tokens(&css, light);
-        let alpha = stale_mark_opacity(&css, light);
+        let alpha = stale_mark_opacity(&tokens);
         assert!(alpha < 1.0, "the stale fill is dimmed");
         for meter in ["--meter", "--meter-warn", "--meter-full"] {
             let [r, g, b, _] = srgba(resolve(&tokens, meter));
@@ -824,8 +824,8 @@ fn a_dimmed_stale_meter_fill_keeps_three_to_one() {
 fn the_dark_theme_dims_a_stale_meter_fill_further_than_light() {
     let css = style();
     let (dark, light) = (
-        stale_mark_opacity(&css, false),
-        stale_mark_opacity(&css, true),
+        stale_mark_opacity(&theme_tokens(&css, false)),
+        stale_mark_opacity(&theme_tokens(&css, true)),
     );
 
     assert!((light - 0.85).abs() < 1e-9, "light is {light}");
@@ -840,7 +840,7 @@ fn the_dark_theme_dims_a_stale_meter_fill_further_than_light() {
 /// on --bg is 4.43:1); drop the `.view-link` color -> red (no color); color
 /// `.models-link` with `var(--accent)` -> red.
 #[test]
-fn the_see_view_links_keep_four_and_a_half_to_one() {
+fn the_see_view_and_nickname_links_keep_four_and_a_half_to_one() {
     let css = style();
     let decls = css_decls(&css);
     for sel in [".glance-link", ".view-link", ".models-link"] {

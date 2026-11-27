@@ -86,6 +86,14 @@
     return a;
   }
 
+  // Text a screen reader reads and the eye does not see.
+  function srOnlyText(text) {
+    var span = document.createElement('span');
+    span.className = 'sr-only';
+    span.textContent = text;
+    return span;
+  }
+
   // A sortable column: `id` names it in the address
   // (`sort=<table>.<id>.<asc|desc>`) and `value(row)` is what it sorts by, a
   // number or a string of one type per column, or null when the row has none.
@@ -122,10 +130,7 @@
     if (expandable) {
       var eth = document.createElement('th');
       eth.scope = 'col';
-      var sr = document.createElement('span');
-      sr.className = 'sr-only';
-      sr.textContent = 'Details';
-      eth.appendChild(sr);
+      eth.appendChild(srOnlyText('Details'));
       hr.appendChild(eth);
     }
     cols.forEach(function (col) {

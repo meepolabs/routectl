@@ -20,6 +20,11 @@
 
   var TRAFFIC_READ_FAILED = "Couldn't read traffic from routectl";
 
+  // The latency columns are read over every request while time to first
+  // token (TTFT_POPULATION) is read over streamed successes only, so a
+  // failing group's latency can sit under its time to first token.
+  var LATENCY_POPULATION = 'over every request, failures included';
+
   // The missing-price dimension the server names for cache writes of unknown
   // lifetime. No configuration key prices it at any rate, and the remainder
   // sentence already says so, so the No price block never repeats it there;
@@ -385,8 +390,8 @@
       var line = chainLine('Step ' + (i + 1), name, s.requests, total);
       var hint = globStepHint(s);
       if (hint) {
-        var name = line.querySelector('.traffic-stepname');
-        name.parentNode.insertBefore(hint, name.nextSibling);
+        var nameEl = line.querySelector('.traffic-stepname');
+        nameEl.parentNode.insertBefore(hint, nameEl.nextSibling);
       }
       block.appendChild(line);
     });
