@@ -80,7 +80,8 @@
   }
 
   // The Doctor section head over the attention list: its count, its dot, its
-  // accessible name, and the tab badge beside it.
+  // accessible name, and the tab badge beside it (as shown, and its text and
+  // hidden state read apart, so a hidden badge's text is seen too).
   function doctorHead() {
     var section = attentionSectionNode();
     var head = section && section.querySelector('.card-head');
@@ -91,6 +92,8 @@
       name: head ? d.accessibleName(head.querySelector('.card-title')) : null,
       dot: dot ? dot.className : null,
       badge: badge.hidden ? null : badge.textContent,
+      badge_text: badge.textContent,
+      badge_hidden: badge.hidden,
       clear_line: section ? section.querySelectorAll('.attn-clear').length : null,
       head_lines: section ? section.querySelectorAll('.card-head').length : null
     };

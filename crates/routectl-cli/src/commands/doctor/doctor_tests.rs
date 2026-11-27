@@ -390,14 +390,13 @@ fn expired_seat_warns_valid_seat_passes() {
 /// An expired seat's remediation logs in that same seat: the labeled seat's
 /// command carries its `--label`, a label the shell would split is quoted, a
 /// non-default config file is named, and a label with no exact printable form
-/// gets no command at all.
+/// gets no command at all, not even a partial one.
 ///
 /// Mutation check: drop `.option("--label", label)` from
 /// `seat_login_command` -> the labeled rows go red.
 #[test]
 fn an_expired_seat_remediation_names_the_login_for_that_seat() {
-    const UNPRINTABLE: &str =
-        "log this seat in again with `routectl login` (its exact command cannot be printed)";
+    const UNPRINTABLE: &str = "log this seat in again (its exact login command cannot be printed)";
     let rows: &[(&str, &str, Option<&str>, &str)] = &[
         (
             "default seat",
@@ -452,6 +451,13 @@ fn an_expired_seat_remediation_names_the_login_for_that_seat() {
             Some(*remediation),
             "row `{row}`"
         );
+        if *remediation == UNPRINTABLE {
+            let printed = findings[0].remediation.as_deref().unwrap_or_default();
+            assert!(
+                !printed.contains('`') && !printed.contains("routectl "),
+                "row `{row}`: a command was printed: {printed:?}"
+            );
+        }
     }
 }
 

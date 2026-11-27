@@ -68,11 +68,15 @@ fn id_key(raw: &str) -> String {
 /// above it, and the Fail/Warn/Pass headline is gone while the report's
 /// findings still render (positive control). Served an empty panel, the head
 /// reads 0 beside a hidden badge, as one line with no "Nothing needs
-/// attention now." under it.
+/// attention now." under it. The page draws a zero count as no badge at all,
+/// so the hidden badge's own text is empty: a hidden badge still holding the
+/// earlier count would disagree with the head.
 ///
 /// Mutation checks: pass 'now' as the Doctor prefix -> red (duplicate ids);
 /// add `counts.recovered` to the head count -> red; pass attentionClear() as
-/// the Doctor section's lead -> red (the healthy case is two lines).
+/// the Doctor section's lead -> red (the healthy case is two lines); keep the
+/// label when `setTabBadge` hides a badge -> red (the hidden badge still
+/// reads the earlier count).
 #[test]
 #[ignore = "drives a system headless Chrome"]
 fn page_browser_doctor_lists_now_items_under_its_own_ids_and_heads_them_with_the_badge() {
@@ -101,6 +105,8 @@ fn page_browser_doctor_lists_now_items_under_its_own_ids_and_heads_them_with_the
     let head = &out["active"];
     assert_eq!(head["count"], active.to_string(), "{out:#}");
     assert_eq!(head["badge"], head["count"], "{out:#}");
+    assert_eq!(head["badge_text"], head["count"], "{out:#}");
+    assert_eq!(head["badge_hidden"], false, "{out:#}");
     assert_eq!(head["name"], format!("Needs attention {active}"), "{out:#}");
     let tone = if broken > 0 { "bad" } else { "warn" };
     assert_eq!(head["dot"], format!("docdot docdot--{tone}"), "{out:#}");
@@ -120,6 +126,11 @@ fn page_browser_doctor_lists_now_items_under_its_own_ids_and_heads_them_with_the
         healthy["badge"],
         Value::Null,
         "the badge hides at zero: {out:#}"
+    );
+    assert_eq!(healthy["badge_hidden"], true, "{out:#}");
+    assert_eq!(
+        healthy["badge_text"], "",
+        "a zero count is no badge, with no earlier count left in it: {out:#}"
     );
     assert_eq!(healthy["name"], "Needs attention 0", "{out:#}");
     assert_eq!(healthy["dot"], "docdot docdot--ok", "{out:#}");

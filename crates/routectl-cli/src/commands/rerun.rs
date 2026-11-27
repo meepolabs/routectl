@@ -114,14 +114,12 @@ pub fn seat_login_command(
 
 /// A hint to log a stored seat in again, for a report the operator did not
 /// produce by running `routectl login`: an instruction to run `command`
-/// followed by `purpose`, else a sentence that names no command, since one
-/// without the seat's label or config file would log in a different seat.
+/// followed by `purpose`, else a sentence that names no command, not even a
+/// partial one, since one without the seat's label or config file would log
+/// in a different seat.
 pub fn seat_login_hint(command: Option<String>, purpose: &str) -> String {
     command.map_or_else(
-        || {
-            "log this seat in again with `routectl login` (its exact command cannot be printed)"
-                .to_string()
-        },
+        || "log this seat in again (its exact login command cannot be printed)".to_string(),
         |command| format!("run `{command}` {purpose}"),
     )
 }

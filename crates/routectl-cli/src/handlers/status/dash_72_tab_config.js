@@ -104,7 +104,7 @@
   }
 
   // The path is copied, so it is never cut: it takes a row of its own and
-  // breaks only after a slash. Each piece ends at a slash and is drawn
+  // breaks only after a path separator. Each piece ends at one and is drawn
   // unbreakable unless it alone is wider than the row; the pieces are text
   // in one element, so a selection copies the path exactly.
   function configPathFact(path) {
@@ -128,9 +128,11 @@
   // Built from its char code: page.rs rejects a quoted literal starting
   // with a slash.
   var PATH_SLASH = String.fromCharCode(47);
+  var PATH_BACKSLASH = String.fromCharCode(92);
 
-  // `path` cut after each slash that ends a named segment, so a run of
-  // slashes (the root's included) stays with the segment after it.
+  // `path` cut after each separator (a slash, or a Windows backslash) that
+  // ends a named segment, so a run of separators (the root's included) stays
+  // with the segment after it.
   function pathPieces(path) {
     var pieces = [];
     var piece = '';
@@ -138,7 +140,7 @@
     for (var i = 0; i < path.length; i++) {
       var ch = path.charAt(i);
       piece += ch;
-      if (ch !== PATH_SLASH) {
+      if (ch !== PATH_SLASH && ch !== PATH_BACKSLASH) {
         named = true;
       } else if (named) {
         pieces.push(piece);

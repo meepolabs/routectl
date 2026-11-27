@@ -478,7 +478,7 @@ list with more narrative.
 
 ### Changed
 
-- **The dashboard's Config tab shows the whole config path and says when pool order matters.** The config file sits on its own row of the version strip and wraps only after a `/`, so a long path is never cut and copies exactly; it no longer carries a tooltip duplicate. The Pools members column is headed `Members`, and only a `fill-first` pool adds `tried in the order listed` under its members (a `sticky-least-loaded` pool lists them without numbering).
+- **The dashboard's Config tab shows the whole config path and says when pool order matters.** The config file sits on its own row of the version strip and wraps only after a path separator (`/`, or `\` in a Windows path), so a long path is never cut and copies exactly; it no longer carries a tooltip duplicate. The Pools members column is headed `Members`, and only a `fill-first` pool adds `tried in the order listed` under its members (a `sticky-least-loaded` pool lists them without numbering).
 
 - **The Models table draws an absent value as a faint dash.** A lane with no refusal reads a faint `-` in Refuses, and a lane nothing was checked on a faint `-` in Changed in transit; a screen reader still reads `none` and `unmeasured`. Refuses is now as wide as its content, so at 1024 px the whole table fits its card. Column order is unchanged.
 

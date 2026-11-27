@@ -248,10 +248,10 @@ td > .hchips { max-width: 24rem; }
   overflow-wrap: anywhere;
 }
 /* The config path is copied, so it is never cut: it takes the whole row and
-   breaks only between its pieces (each ends at a slash). A piece is an
-   inline box no wider than the row, so it moves to the next line whole and
-   breaks inside itself only when it alone is wider than the row; that keeps
-   the page from scrolling sideways. */
+   breaks only between its pieces (each ends at a path separator). A piece is
+   an inline box no wider than the row, so it moves to the next line whole
+   and breaks inside itself only when it alone is wider than the row; that
+   keeps the page from scrolling sideways. */
 .cfgfact--path {
   grid-column: 1 / -1;
 }

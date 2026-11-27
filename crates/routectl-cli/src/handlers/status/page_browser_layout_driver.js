@@ -370,6 +370,13 @@
     'with-some-more-depth/and-a-segment-that-is-quite-long-on-its-own/x/' +
     'the-last-folder-before-the-file/one-more/and-again-one-more/config.toml';
 
+  // The same shape as a Windows path: backslashes, and a drive letter.
+  var LONG_WINDOWS_CONFIG_PATH = 'C:\\Users\\operator-with-a-long-account-name\\AppData\\' +
+    'Roaming\\routectl\\profiles\\a-rather-long-profile-directory-name\\nested\\' +
+    'another-level-of-folders\\with-some-more-depth\\' +
+    'and-a-segment-that-is-quite-long-on-its-own\\x\\the-last-folder-before-the-file\\' +
+    'one-more\\and-again-one-more\\config.toml';
+
   // Each character of `el`'s text with the top of the line it is drawn on.
   function charTops(el) {
     var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
@@ -408,16 +415,17 @@
     return found;
   }
 
-  d.scenario('layout-config-path', function () {
+  // Serves `path` as the config file and reads how the strip draws it.
+  function configPathLayout(path) {
     d.rewrite(function (url, text) {
       if (url.pathname !== '/status') { return text; }
       var agg = JSON.parse(text);
-      agg.panels.config.data.source.config_path = LONG_CONFIG_PATH;
+      agg.panels.config.data.source.config_path = path;
       return JSON.stringify(agg);
     });
     return d.waitUntil('the long path', function () {
       var strip = document.querySelector('#body-config .cfgstrip');
-      return strip && factValue(strip, 'config file').textContent === LONG_CONFIG_PATH && strip;
+      return strip && factValue(strip, 'config file').textContent === path && strip;
     }).then(function (strip) {
       var value = factValue(strip, 'config file');
       var fact = value.closest('.cfgfact');
@@ -435,7 +443,7 @@
         function (f) { return f !== fact; });
       return {
         inner_width: window.innerWidth,
-        wire: LONG_CONFIG_PATH,
+        wire: path,
         text: value.textContent,
         selected: selected,
         title: value.getAttribute('title'),
@@ -452,6 +460,25 @@
         page_scrolls_sideways:
           document.documentElement.scrollWidth > document.documentElement.clientWidth
       };
+    });
+  }
+
+  d.scenario('layout-config-path', function () {
+    return configPathLayout(LONG_CONFIG_PATH);
+  });
+
+  d.scenario('layout-config-path-windows', function () {
+    return configPathLayout(LONG_WINDOWS_CONFIG_PATH);
+  });
+
+  // The pieces the page cuts each of the test's paths into, once the page
+  // has drawn an answer; the test patches the page to publish its splitter
+  // and the paths.
+  d.scenario('layout-config-path-pieces', function () {
+    return d.waitFor('/status', 1).then(function () {
+      return window.routectlPathPieceInputs.map(function (path) {
+        return window.routectlPathPieces(path);
+      });
     });
   });
 

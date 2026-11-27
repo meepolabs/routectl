@@ -175,10 +175,11 @@ banner, no retry signal -- silently mislabeled data.
   configuration is not in effect while displaying it.
 - Config's version strip gives the config file its own row. Serve a config
   from a deeply nested folder (a path longer than the strip at 720 px): at
-  720, 1024 and 1440 px the path wraps only right after a `/`, never inside
-  a folder name, nothing is cut or hidden behind a tooltip, and selecting
-  the value and pasting it gives the path exactly. Served with no config
-  file the row reads `none (not loaded from a file)`.
+  720, 1024 and 1440 px the path wraps only right after a path separator
+  (a `/`, or a `\` in a Windows path such as `C:\Users\...\config.toml`),
+  never inside a folder name, nothing is cut or hidden behind a tooltip,
+  and selecting the value and pasting it gives the path exactly. Served
+  with no config file the row reads `none (not loaded from a file)`.
 - Config's Pools table heads the members column `Members`. Serve one
   `fill-first` pool and one `sticky-least-loaded` pool: only the fill-first
   row ends its members with a faint `tried in the order listed`.

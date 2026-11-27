@@ -262,9 +262,9 @@ fn page_browser_the_outage_strip_keeps_the_sentence_whole_at_double_text_size() 
     );
 }
 
-fn run_config_path(width: u32) -> Value {
+fn run_config_path(name: &'static str, width: u32) -> Value {
     let scenario = browser::Scenario {
-        name: "layout-config-path",
+        name,
         hash: "config",
         snippets: &[LAYOUT_DRIVER],
         budget_ms: LAYOUT_BUDGET_MS,
@@ -273,39 +273,132 @@ fn run_config_path(width: u32) -> Value {
     browser::run_scenario_with(&scenario, &[&window]).result
 }
 
-/// A config path longer than its row, at 720, 1024 and 1440 px: it sits on
-/// a strip row of its own, moves to a new line only right after a slash,
-/// is cut nowhere (no overflow, nothing past the strip, the page does not
-/// scroll sideways), carries no title, and both its text and a selection of
-/// it are the served path exactly. Positive control: the path does wrap at
-/// every width, so the slash rule was exercised.
+/// A config path longer than its row, at 720, 1024 and 1440 px, once with
+/// slashes and once as a Windows path with backslashes: it sits on a strip
+/// row of its own, moves to a new line only right after a separator, is cut
+/// nowhere (no overflow, nothing past the strip, the page does not scroll
+/// sideways), carries no title, and both its text and a selection of it are
+/// the served path exactly. Positive control: the path does wrap at every
+/// width, so the separator rule was exercised.
 ///
 /// Mutation checks: drop `display: inline-block` from `.cfgpath-piece` ->
 /// red (a line breaks inside a segment); drop `grid-column` from
-/// `.cfgfact--path` -> red (the path shares its row).
+/// `.cfgfact--path` -> red (the path shares its row); stop `pathPieces`
+/// ending a piece at a backslash -> red (the Windows path breaks inside a
+/// segment).
 #[test]
 #[ignore = "drives a system headless Chrome"]
-fn page_browser_config_path_wraps_only_at_a_slash_and_is_never_cut() {
-    for width in [720, 1024, 1440] {
-        let out = run_config_path(width);
-        let at = format!("at {width} px");
-        assert_eq!(out["inner_width"].as_u64(), Some(u64::from(width)), "{at}");
-        assert_eq!(out["text"], out["wire"], "{at}: {out:#}");
-        assert_eq!(out["selected"], out["wire"], "{at}: {out:#}");
-        assert_eq!(out["title"], Value::Null, "{at}: {out:#}");
-        assert!(
-            out["lines"].as_u64().unwrap_or(0) > 1,
-            "{at}: premise, the path wraps: {out:#}"
-        );
-        let inside_segment: Vec<&Value> = list(&out, "breaks")
+fn page_browser_config_path_wraps_only_after_a_separator_and_is_never_cut() {
+    let shapes = [
+        ("slashes", "layout-config-path", "/|"),
+        ("backslashes", "layout-config-path-windows", "\\|"),
+    ];
+    for (shape, scenario, after_separator) in shapes {
+        for width in [720, 1024, 1440] {
+            let out = run_config_path(scenario, width);
+            let at = format!("{shape} at {width} px");
+            assert_eq!(out["inner_width"].as_u64(), Some(u64::from(width)), "{at}");
+            assert_eq!(out["text"], out["wire"], "{at}: {out:#}");
+            assert_eq!(out["selected"], out["wire"], "{at}: {out:#}");
+            assert_eq!(out["title"], Value::Null, "{at}: {out:#}");
+            assert!(
+                out["lines"].as_u64().unwrap_or(0) > 1,
+                "{at}: premise, the path wraps: {out:#}"
+            );
+            let inside_segment: Vec<&Value> = list(&out, "breaks")
+                .iter()
+                .filter(|b| !b.as_str().is_some_and(|b| b.starts_with(after_separator)))
+                .collect();
+            assert_eq!(inside_segment, Vec::<&Value>::new(), "{at}: {out:#}");
+            assert_eq!(out["cut"], false, "{at}: {out:#}");
+            assert_eq!(out["right_inside_strip"], true, "{at}: {out:#}");
+            assert_eq!(out["row_to_itself"], true, "{at}: {out:#}");
+            assert_eq!(out["page_scrolls_sideways"], false, "{at}: {out:#}");
+        }
+    }
+}
+
+/// The line that declares the page's path splitter.
+const PATH_PIECES_DECLARED: &str = "  function pathPieces(path) {\n";
+
+/// Each config path shape, with the pieces the strip draws it in: a piece
+/// ends at the first slash or backslash after a named segment, and the rest
+/// of a run of separators (the root's included) starts the next piece.
+const PATH_PIECE_ROWS: &[(&str, &str, &[&str])] = &[
+    ("posix path", "/a/b/c.toml", &["/a/", "b/", "c.toml"]),
+    ("separator runs", "//x//y/z", &["//x/", "/y/", "z"]),
+    (
+        "relative path",
+        "relative/dir/f",
+        &["relative/", "dir/", "f"],
+    ),
+    ("root alone", "/", &["/"]),
+    (
+        "windows path",
+        "C:\\Users\\op\\config.toml",
+        &["C:\\", "Users\\", "op\\", "config.toml"],
+    ),
+    (
+        "windows share",
+        "\\\\host\\share\\config.toml",
+        &["\\\\host\\", "share\\", "config.toml"],
+    ),
+    (
+        "mixed separators",
+        "C:\\Users/op\\rc/config.toml",
+        &["C:\\", "Users/", "op\\", "rc/", "config.toml"],
+    ),
+    ("trailing slash", "/etc/routectl/", &["/etc/", "routectl/"]),
+    ("trailing backslash", "C:\\cfg\\", &["C:\\", "cfg\\"]),
+    ("empty", "", &[]),
+];
+
+/// The page with its path splitter and the rows' paths published on
+/// `window`, for the driver to call.
+fn with_published_path_pieces(page: String) -> String {
+    assert_eq!(
+        page.matches(PATH_PIECES_DECLARED).count(),
+        1,
+        "the page declares its path splitter as this test expects"
+    );
+    let inputs: Vec<&str> = PATH_PIECE_ROWS.iter().map(|(_, path, _)| *path).collect();
+    let inputs = serde_json::to_string(&inputs).expect("the paths as JSON");
+    page.replace(
+        PATH_PIECES_DECLARED,
+        &format!(
+            "  window.routectlPathPieces = pathPieces;\n  \
+             window.routectlPathPieceInputs = {inputs};\n{PATH_PIECES_DECLARED}"
+        ),
+    )
+}
+
+/// The page cuts every row's path into the pieces listed, and the pieces
+/// put back together are the path exactly, so a copy of the drawn path is
+/// the served one.
+///
+/// Mutation check: stop `pathPieces` ending a piece at a backslash -> red
+/// (the Windows rows come back as one piece).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_config_path_pieces_end_after_each_separator_and_rejoin_exactly() {
+    let scenario = browser::Scenario {
+        name: "layout-config-path-pieces",
+        hash: "config",
+        snippets: &[LAYOUT_DRIVER],
+        budget_ms: LAYOUT_BUDGET_MS,
+    };
+    let out = browser::run_scenario_on_patched_page(&scenario, with_published_path_pieces).result;
+    let drawn = out.as_array().expect("one list of pieces per path");
+    assert_eq!(drawn.len(), PATH_PIECE_ROWS.len(), "{out:#}");
+    for ((row, path, pieces), got) in PATH_PIECE_ROWS.iter().zip(drawn) {
+        assert_eq!(*got, json!(pieces), "row `{row}`");
+        let rejoined: String = got
+            .as_array()
+            .expect("a list of pieces")
             .iter()
-            .filter(|b| !b.as_str().is_some_and(|b| b.starts_with("/|")))
+            .map(|p| p.as_str().expect("a piece"))
             .collect();
-        assert_eq!(inside_segment, Vec::<&Value>::new(), "{at}: {out:#}");
-        assert_eq!(out["cut"], false, "{at}: {out:#}");
-        assert_eq!(out["right_inside_strip"], true, "{at}: {out:#}");
-        assert_eq!(out["row_to_itself"], true, "{at}: {out:#}");
-        assert_eq!(out["page_scrolls_sideways"], false, "{at}: {out:#}");
+        assert_eq!(rejoined, *path, "row `{row}`");
     }
 }
 
