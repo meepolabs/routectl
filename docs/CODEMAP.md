@@ -383,7 +383,10 @@ license.
   and the env-only log knob resolvers and boot status lines: log-safe
   rendering of untrusted text; also `render_operator_name` /
   `render_operator_text` (terminal-safe operator-written names) and
-  `MAX_PROVIDER_NAME_BYTES`
+  `MAX_PROVIDER_NAME_BYTES`; `redact_prompts_in` is the prompt-redaction
+  walker, which also redacts tool-call payloads and text on typed items
+  (Responses, Chat, Anthropic and Gemini item kinds) and a bare-string
+  top-level Responses `input`
 - `src/parsed_error_body.rs` -- `ParsedErrorBody`: the single capped parse
   of an upstream error body carried on `Error::Upstream` (read via
   `Error::parsed_body`), plus its envelope / `error.*` accessors and
@@ -1091,7 +1094,15 @@ license.
 - `src/openai_compat/dialect.rs` -- public `ReasoningDialect` enum +
   format-tag accessors
 - `src/openai_compat/request.rs` -- `normalize`, `select_client_extras`,
-  `force_stream_include_usage`: `ChatRequest` -> OpenAI-compat wire body
+  `force_stream_include_usage`: `ChatRequest` -> OpenAI-compat wire body;
+  `normalize_for_upstream` takes an `Upstream` (`Aws` on the mantle lane,
+  else `OutsideAws`), and `withholds_client_user` drops an Anthropic-ingress
+  client's `user` for an AWS upstream (declared and counted as a fingerprint
+  withhold)
+- `src/openai_compat/mantle_identity_tests.rs` -- (cfg `bedrock`) pins that
+  the mantle lane withholds an Anthropic-ingress `user` (declared at `/user`,
+  counted once) while a first-party upstream or a Chat client's own `user`
+  keeps it
 - `src/openai_compat/request_system_tests.rs` -- `include!`d into
   `request.rs`'s `tests` module: system-content wire and count pins
 - `src/openai_compat/request_drop_level_tests.rs` -- `include!`d into
@@ -7764,7 +7775,9 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   (`.tablewrap`) so the page never scrolls sideways from 720px up, sortable
   headers (`.sort-btn` reserves `--sort-mark-room` for its mark inside its own
   padding, after a text label and before a numeric `th.num` one, so a header
-  never changes width and a numeric label ends on its figures' edge),
+  never changes width and a numeric label ends on its figures' edge; a
+  numeric header's mark is placed by its right edge, `--sort-mark-gap`
+  before the label),
   cards, badges, the `.tok` value-domain token families (mirrored by the label
   maps in `dash_10_format.js` -- a new token is a paired edit in both),
   figures, notes, and the Now view's needs-attention list and accounts-at-a-
@@ -8045,7 +8058,7 @@ Usage-accounting crate: a bounded-channel producer (`UsageHandle`) feeding a
   `reachable|degraded|unknown` before any part is built, so an unknown token
   replaces the section instead of being interpreted. It renders the
   reachability rollup line (`doctorReach`: `REACH_LEAD`, which says the counts
-  come from real traffic since the daemon started and Doctor sends no test
+  are per lane, from real traffic since the daemon started and Doctor sends no test
   requests, then each verdict's count in `REACH_WORDS`' plainer word, so
   `unknown` reads "not used yet"), one card per failing/warning
   finding (severity pill, name, section, detail, and the remediation only when
