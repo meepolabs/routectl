@@ -9,12 +9,19 @@
 //! still reads cleanly as a single block.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use routectl_auth::OAuthStore;
 use routectl_auth::oauth::types::{TokenRecord, unix_now};
 use routectl_core::{Error, Result};
 
-pub async fn run() -> Result<i32> {
+use crate::commands::rerun::{chosen_config_path, seat_login_command, seat_login_hint};
+
+/// `config_path` is the file the global `--config` flag or `ROUTECTL_CONFIG`
+/// named, `None` when neither was given. whoami never reads it; an expired
+/// seat's login hint names it, because that login offers its config change
+/// to the same file.
+pub async fn run(config_path: Option<&Path>) -> Result<i32> {
     let store = OAuthStore::open_default()
         .await
         .map_err(|e| Error::Auth(e.to_string()))?;
@@ -27,7 +34,8 @@ pub async fn run() -> Result<i32> {
     }
 
     let now = unix_now();
-    for line in render_whoami(&entries, now) {
+    let login_config = config_path.and_then(chosen_config_path);
+    for line in render_whoami(&entries, now, login_config) {
         println!("{line}");
     }
     Ok(0)
@@ -38,6 +46,7 @@ pub async fn run() -> Result<i32> {
 /// heading shown to the operator.
 struct SeatView<'a> {
     provider: &'a str,
+    label: Option<&'a str>,
     heading: String,
     rec: &'a TokenRecord,
 }
@@ -57,7 +66,11 @@ fn split_seat_key(key: &str) -> (&str, Option<&str>) {
 /// rendering are unit-testable without opening a store. A blank line
 /// separates seats; the default seat is labeled `<provider> (default)`
 /// and labeled seats as `<provider>#<label>`.
-fn render_whoami(entries: &[(String, TokenRecord)], now: u64) -> Vec<String> {
+fn render_whoami(
+    entries: &[(String, TokenRecord)],
+    now: u64,
+    login_config: Option<&Path>,
+) -> Vec<String> {
     // Group seats by provider so a pool reads as a block. The store
     // already returns keys in sorted order (BTreeMap), so collecting into
     // a BTreeMap of provider -> seats keeps both providers and their
@@ -72,6 +85,7 @@ fn render_whoami(entries: &[(String, TokenRecord)], now: u64) -> Vec<String> {
         };
         by_provider.entry(provider).or_default().push(SeatView {
             provider,
+            label,
             heading,
             rec,
         });
@@ -85,14 +99,14 @@ fn render_whoami(entries: &[(String, TokenRecord)], now: u64) -> Vec<String> {
                 lines.push(String::new());
             }
             first = false;
-            lines.extend(render_seat(&seat, now));
+            lines.extend(render_seat(&seat, now, login_config));
         }
     }
     lines
 }
 
 /// Render the block of lines for a single seat.
-fn render_seat(seat: &SeatView<'_>, now: u64) -> Vec<String> {
+fn render_seat(seat: &SeatView<'_>, now: u64, login_config: Option<&Path>) -> Vec<String> {
     let rec = seat.rec;
     let mut lines = vec![format!("seat: {}", seat.heading)];
     if let Some(email) = &rec.account.email {
@@ -106,7 +120,7 @@ fn render_seat(seat: &SeatView<'_>, now: u64) -> Vec<String> {
     }
     lines.push(format!(
         "  expires_in:  {}",
-        format_expires_in(rec.expires_at_unix, now, seat.provider)
+        format_expires_in(rec.expires_at_unix, now, seat, login_config)
     ));
     lines.push(format!(
         "  obtained:    {}",
@@ -115,13 +129,19 @@ fn render_seat(seat: &SeatView<'_>, now: u64) -> Vec<String> {
     lines
 }
 
-fn format_expires_in(expires_at: u64, now: u64, provider: &str) -> String {
+fn format_expires_in(
+    expires_at: u64,
+    now: u64,
+    seat: &SeatView<'_>,
+    login_config: Option<&Path>,
+) -> String {
     if expires_at <= now {
         let ago = now - expires_at;
-        return format!(
-            "expired {} ago (run `routectl login {provider}` to refresh)",
-            format_duration(ago)
+        let hint = seat_login_hint(
+            seat_login_command(seat.provider, seat.label, login_config),
+            "to refresh",
         );
+        return format!("expired {} ago ({hint})", format_duration(ago));
     }
     let remaining = expires_at - now;
     format_duration(remaining)
@@ -179,14 +199,81 @@ mod tests {
 
     #[test]
     fn format_expires_in_handles_past_and_future() {
-        assert!(format_expires_in(2000, 1500, "anthropic").contains("8m"));
-        let past = format_expires_in(1500, 2000, "anthropic");
-        assert!(past.starts_with("expired"));
-        assert!(past.contains("8m"));
-        assert!(
-            past.contains("routectl login anthropic"),
-            "expected provider-aware refresh hint, got: {past}"
+        let seat = SeatView {
+            provider: "anthropic",
+            label: None,
+            heading: String::new(),
+            rec: &rec("a@example.com", 0),
+        };
+        assert_eq!(format_expires_in(2000, 1500, &seat, None), "8m 20s");
+        assert_eq!(
+            format_expires_in(1500, 2000, &seat, None),
+            "expired 8m 20s ago (run `routectl login anthropic` to refresh)"
         );
+    }
+
+    /// An expired seat's hint logs in that same seat: the labeled seat's
+    /// command carries its `--label`, a label the shell would split is
+    /// quoted, a non-default config file is named, and a label with no exact
+    /// printable form gets no command at all.
+    ///
+    /// Mutation check: drop `.option("--label", label)` from
+    /// `seat_login_command` -> the labeled rows go red.
+    #[test]
+    fn an_expired_seat_names_the_login_for_that_seat() {
+        const UNPRINTABLE: &str = "log this seat in again with `routectl login` \
+                                   (its exact command cannot be printed)";
+        let rows: &[(&str, &str, Option<&str>, &str)] = &[
+            (
+                "default seat",
+                "anthropic",
+                None,
+                "run `routectl login anthropic` to refresh",
+            ),
+            (
+                "labeled seat",
+                "anthropic#work",
+                None,
+                "run `routectl login anthropic --label work` to refresh",
+            ),
+            (
+                "label the shell would split",
+                "anthropic#bob's seat",
+                None,
+                "run `routectl login anthropic --label 'bob'\\''s seat'` to refresh",
+            ),
+            (
+                "label with a control character",
+                "anthropic#wo\u{1b}[2Jrk",
+                None,
+                UNPRINTABLE,
+            ),
+            (
+                "non-default config file",
+                "anthropic#work",
+                Some("/srv/rc/my config.toml"),
+                "run `routectl --config '/srv/rc/my config.toml' login anthropic --label work` \
+                 to refresh",
+            ),
+        ];
+        for (row, key, config, hint) in rows {
+            // Arrange
+            let entries = vec![((*key).to_string(), rec("a@example.com", 1_000))];
+
+            // Act
+            let lines = render_whoami(&entries, 1_000 + 3_700, config.map(Path::new));
+
+            // Assert
+            let expires = lines
+                .iter()
+                .find(|line| line.starts_with("  expires_in:"))
+                .unwrap_or_else(|| panic!("row `{row}`: no expiry line in {lines:?}"));
+            assert_eq!(
+                *expires,
+                format!("  expires_in:  expired 1h 1m ago ({hint})"),
+                "row `{row}`"
+            );
+        }
     }
 
     /// Rows recorded from the formatter this function used before.
@@ -251,7 +338,7 @@ mod tests {
         ];
 
         // Act
-        let lines = render_whoami(&entries, 1000);
+        let lines = render_whoami(&entries, 1000, None);
 
         // Assert: both seats render, the default labeled `(default)` and
         // the labeled seat as `anthropic#seat-b`, each with its own
@@ -280,7 +367,7 @@ mod tests {
         // A lone default seat renders one block with no `(default)`
         // ambiguity and no leading blank line.
         let entries = vec![("anthropic".to_string(), rec("solo@example.com", 4000))];
-        let lines = render_whoami(&entries, 1000);
+        let lines = render_whoami(&entries, 1000, None);
         assert_eq!(lines[0], "seat: anthropic (default)");
         assert!(!lines.is_empty());
         assert!(lines.join("\n").contains("solo@example.com"));

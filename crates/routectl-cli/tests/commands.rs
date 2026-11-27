@@ -83,7 +83,7 @@ async fn whoami_returns_exit_code_2_when_empty() {
     let tmp = tempfile::tempdir().unwrap();
     let _xdg = ScopedEnv::set("XDG_CONFIG_HOME", tmp.path());
 
-    let code = commands::whoami::run()
+    let code = commands::whoami::run(None)
         .await
         .expect("whoami should not error on empty store");
     assert_eq!(code, 2, "whoami must return 2 when no providers logged in");
@@ -577,7 +577,7 @@ async fn logout_codex_removes_seeded_record() {
     commands::logout::run("codex", None)
         .await
         .expect("second logout codex is a no-op, not an error");
-    let code = commands::whoami::run().await.expect("whoami ok");
+    let code = commands::whoami::run(None).await.expect("whoami ok");
     assert_eq!(code, 2, "store should be empty after logging out of codex");
 }
 
@@ -627,7 +627,7 @@ async fn whoami_lists_both_anthropic_and_codex_when_present() {
         ],
     );
 
-    let code = commands::whoami::run()
+    let code = commands::whoami::run(None)
         .await
         .expect("whoami should not error with two providers seeded");
     assert_eq!(code, 0, "whoami must exit 0 when providers are logged in");
@@ -721,7 +721,7 @@ async fn whoami_lists_seats_grouped_by_provider() {
         ],
     );
 
-    let code = commands::whoami::run()
+    let code = commands::whoami::run(None)
         .await
         .expect("whoami should not error with a pooled provider");
     assert_eq!(code, 0, "whoami must exit 0 when seats are present");

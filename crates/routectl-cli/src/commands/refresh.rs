@@ -12,7 +12,7 @@ use routectl_auth::oauth::types::{seat_key, unix_now};
 use routectl_auth::{ForcedRefreshError, OAuthStore};
 use routectl_core::{Error, Result, render_operator_text};
 
-use crate::commands::rerun::{RerunCommand, chosen_config_path, instruction};
+use crate::commands::rerun::{chosen_config_path, instruction, seat_login_command};
 use crate::commands::seat::{shell_word, validate_label};
 
 /// `config_path` is the file the global `--config` flag or `ROUTECTL_CONFIG`
@@ -85,11 +85,7 @@ fn refresh_error(
 /// form.
 fn login_rerun(provider: &str, label: Option<&str>, config_path: Option<&Path>) -> String {
     instruction(
-        RerunCommand::routectl(config_path)
-            .word("login")
-            .value(provider)
-            .option("--label", label)
-            .render(),
+        seat_login_command(provider, label, config_path),
         &format!(
             "routectl login {}",
             shell_word(&render_operator_text(provider))

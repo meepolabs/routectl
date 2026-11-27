@@ -647,7 +647,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
-        Cmd::Whoami => match commands::whoami::run().await {
+        Cmd::Whoami => match commands::whoami::run(cli.config.as_deref()).await {
             Ok(code) => std::process::exit(code),
             Err(e) => {
                 eprintln!("error: {e}");

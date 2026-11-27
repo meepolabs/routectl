@@ -102,6 +102,7 @@ pub(super) fn ctx(
         parked_seats: Vec::new(),
         unusable_seats: Vec::new(),
         leftover_catalog_files: Vec::new(),
+        login_config: None,
         legacy_folders: Vec::new(),
     }
 }
@@ -384,6 +385,74 @@ fn expired_seat_warns_valid_seat_passes() {
             .unwrap()
             .contains("routectl login codex")
     );
+}
+
+/// An expired seat's remediation logs in that same seat: the labeled seat's
+/// command carries its `--label`, a label the shell would split is quoted, a
+/// non-default config file is named, and a label with no exact printable form
+/// gets no command at all.
+///
+/// Mutation check: drop `.option("--label", label)` from
+/// `seat_login_command` -> the labeled rows go red.
+#[test]
+fn an_expired_seat_remediation_names_the_login_for_that_seat() {
+    const UNPRINTABLE: &str =
+        "log this seat in again with `routectl login` (its exact command cannot be printed)";
+    let rows: &[(&str, &str, Option<&str>, &str)] = &[
+        (
+            "default seat",
+            "anthropic",
+            None,
+            "run `routectl login anthropic` to renew this seat",
+        ),
+        (
+            "labeled seat",
+            "anthropic#work",
+            None,
+            "run `routectl login anthropic --label work` to renew this seat",
+        ),
+        (
+            "label the shell would split",
+            "anthropic#bob's seat",
+            None,
+            "run `routectl login anthropic --label 'bob'\\''s seat'` to renew this seat",
+        ),
+        (
+            "label with a control character",
+            "anthropic#wo\u{1b}[2Jrk",
+            None,
+            UNPRINTABLE,
+        ),
+        (
+            "non-default config file",
+            "anthropic#work",
+            Some("/srv/rc/my config.toml"),
+            "run `routectl --config '/srv/rc/my config.toml' login anthropic --label work` \
+             to renew this seat",
+        ),
+    ];
+    for (row, key, config, remediation) in rows {
+        // Arrange
+        let mut context = ctx(
+            Config::default(),
+            Some(&current_version_stamp()),
+            Vec::new(),
+            vec![((*key).to_string(), token_record_no_refresh(500))],
+        );
+        context.login_config = config.map(PathBuf::from);
+
+        // Act
+        let findings = section_auth(&context);
+
+        // Assert
+        assert_eq!(findings.len(), 1, "row `{row}`: {findings:?}");
+        assert_eq!(findings[0].status, Status::Warn, "row `{row}`");
+        assert_eq!(
+            findings[0].remediation.as_deref(),
+            Some(*remediation),
+            "row `{row}`"
+        );
+    }
 }
 
 #[tokio::test]
@@ -2590,6 +2659,7 @@ fn rendered_report_leaks_neither_a_config_secret_nor_a_store_path() {
         parked_seats: Vec::new(),
         unusable_seats: Vec::new(),
         leftover_catalog_files: Vec::new(),
+        login_config: None,
         legacy_folders: Vec::new(),
     };
     let report = build_report(&context);

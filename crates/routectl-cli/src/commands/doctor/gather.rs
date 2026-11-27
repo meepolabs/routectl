@@ -22,6 +22,7 @@ use crate::commands::pricing::{
     is_subscription,
 };
 use crate::commands::probe::{PROBE_DEADLINE, probe_all};
+use crate::commands::rerun::chosen_config_path;
 use crate::config_folder::LegacyConfigDir;
 use crate::local_time::LocalZone;
 use crate::server::CompositeStore;
@@ -145,6 +146,7 @@ pub async fn gather_context_no_network(
         would_trim,
         cache_ignore,
         now_unix: unix_now(),
+        login_config: chosen_config_path(config_path).map(Path::to_path_buf),
         binary_version: env!("CARGO_PKG_VERSION"),
         capability,
         capability_matrix,

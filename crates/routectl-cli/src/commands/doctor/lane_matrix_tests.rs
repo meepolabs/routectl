@@ -82,6 +82,7 @@ pub(super) fn context(config: Config, source: CapabilityMatrixSource) -> DoctorC
         parked_seats: Vec::new(),
         unusable_seats: Vec::new(),
         leftover_catalog_files: Vec::new(),
+        login_config: None,
         legacy_folders: Vec::new(),
     }
 }

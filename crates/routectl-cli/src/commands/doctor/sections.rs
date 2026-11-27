@@ -1,6 +1,7 @@
 //! Doctor section producers.
 
 use std::fmt::Write as _;
+use std::path::Path;
 
 use routectl_auth::oauth::types::TokenRecord;
 use routectl_core::{render_operator_name, sanitize_for_log_with_cap};
@@ -18,6 +19,7 @@ use crate::commands::pricing::{
     CacheWriteSpellingConflict, dimension_label, missing_equivalence_dimensions,
 };
 use crate::commands::probe::{login_id_for, probe_finding};
+use crate::commands::rerun::{seat_login_command, seat_login_hint};
 use crate::commands::seat::shell_word;
 use crate::commands::seat_report::{
     PoolHealth, PoolRow, describe_pool, describe_row, pool_rows, safe, stored_seat_pool_rows,
@@ -655,14 +657,20 @@ fn oauth_seat_findings(ctx: &DoctorContext) -> Vec<Finding> {
     }
     ctx.seats
         .iter()
-        .map(|(key, rec)| auth_finding(key, rec, ctx.now_unix))
+        .map(|(key, rec)| auth_finding(key, rec, ctx.now_unix, ctx.login_config.as_deref()))
         .collect()
 }
 
 /// One seat's auth finding. The seat key's label half is operator-written, so
-/// both the finding name and the `login` remediation route through the shared
-/// log-safe helper -- same reason as the orphan section.
-fn auth_finding(seat_key: &str, rec: &TokenRecord, now: u64) -> Finding {
+/// the finding name routes through the shared log-safe helper -- same reason
+/// as the orphan section -- and the `login` remediation names the seat's
+/// exact command, or none when it has no exact printable form.
+fn auth_finding(
+    seat_key: &str,
+    rec: &TokenRecord,
+    now: u64,
+    login_config: Option<&Path>,
+) -> Finding {
     if rec.is_locally_usable(now) {
         Finding {
             section: "auth",
@@ -672,21 +680,21 @@ fn auth_finding(seat_key: &str, rec: &TokenRecord, now: u64) -> Finding {
             remediation: None,
         }
     } else {
-        let provider = safe(seat_provider(seat_key));
+        let (provider, label) = match seat_key.split_once('#') {
+            Some((provider, label)) => (provider, Some(label)),
+            None => (seat_key, None),
+        };
         Finding {
             section: "auth",
             name: safe(seat_key),
             status: Status::Warn,
             detail: "access token expired".to_string(),
-            remediation: Some(format!(
-                "run `routectl login {provider}` to renew this seat"
+            remediation: Some(seat_login_hint(
+                seat_login_command(provider, label, login_config),
+                "to renew this seat",
             )),
         }
     }
-}
-
-fn seat_provider(seat_key: &str) -> &str {
-    seat_key.split_once('#').map_or(seat_key, |(p, _)| p)
 }
 
 /// Capability section: the config-derived findings NOT absorbed by the

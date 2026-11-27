@@ -95,3 +95,33 @@ pub fn instruction(command: Option<String>, same: &str) -> String {
         |command| format!("re-run `{command}`"),
     )
 }
+
+/// The `routectl login` command that logs stored seat `provider`, labeled
+/// `label` (`None` for the default seat), in again against `config_path`
+/// (`None` for the default file); `None` when a value has no exact printable
+/// form.
+pub fn seat_login_command(
+    provider: &str,
+    label: Option<&str>,
+    config_path: Option<&Path>,
+) -> Option<String> {
+    RerunCommand::routectl(config_path)
+        .word("login")
+        .value(provider)
+        .option("--label", label)
+        .render()
+}
+
+/// A hint to log a stored seat in again, for a report the operator did not
+/// produce by running `routectl login`: an instruction to run `command`
+/// followed by `purpose`, else a sentence that names no command, since one
+/// without the seat's label or config file would log in a different seat.
+pub fn seat_login_hint(command: Option<String>, purpose: &str) -> String {
+    command.map_or_else(
+        || {
+            "log this seat in again with `routectl login` (its exact command cannot be printed)"
+                .to_string()
+        },
+        |command| format!("run `{command}` {purpose}"),
+    )
+}

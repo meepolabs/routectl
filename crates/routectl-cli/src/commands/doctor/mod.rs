@@ -73,7 +73,7 @@ mod name_render_tests;
 #[path = "doctor_attention_run_tests.rs"]
 mod doctor_attention_run_tests;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use routectl_auth::LocalProbe;
@@ -416,6 +416,10 @@ pub(crate) struct DoctorContext {
     /// when the ledger could not answer.
     cache_ignore: CacheIgnoreReport,
     now_unix: u64,
+    /// The config file a `routectl login` hint names with `--config`, `None`
+    /// when a bare `routectl` resolves the same file
+    /// ([`crate::commands::rerun::chosen_config_path`]).
+    login_config: Option<PathBuf>,
     binary_version: &'static str,
     /// The capability section's read-only input (see [`CapabilityInputs`]).
     capability: CapabilityInputs,
