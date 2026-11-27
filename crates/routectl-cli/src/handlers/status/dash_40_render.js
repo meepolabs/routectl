@@ -138,10 +138,17 @@
     renderSourceChanged(name);
   }
 
+  // The transport kind of the last failed aggregate round. The strip reads it
+  // only while the attention source is stale or dead, and on a running page
+  // only such a failure leaves it so: a good round makes it current again, so
+  // the kind it left behind is never read.
+  var aggregateFailureKind = null;
+
   // An unreachable daemon puts up no banner: the verdict strip already says
   // the daemon cannot be reached, and a banner left by an earlier overload or
   // timeout would name the wrong cause.
   function markTransport(kind) {
+    aggregateFailureKind = kind;
     GET_SOURCES.forEach(function (n) { markSourceTransport(n); });
     if (kind === 'overloaded') {
       setBanner('warn', 'status overloaded: showing last known values, backing off');
@@ -657,7 +664,7 @@
     }
     var known = current || lastVerdict;
     if (!known) {
-      var why = lastRefreshFailed() ? UNREACHABLE_NOTE : null;
+      var why = lastRefreshFailed() ? refreshFailureNote() : null;
       return { kind: 'idle', text: 'Checking routing state', target: null, note: why };
     }
     return {
@@ -668,11 +675,14 @@
     };
   }
 
+  var REFRESH_FAILURE_NOTES = {
+    overloaded: 'the daemon is overloaded',
+    timeout: 'the status request timed out'
+  };
   var UNREACHABLE_NOTE = 'the daemon cannot be reached';
 
   // Whether the attention source's last refresh failed, leaving it stale or
-  // dead. Every failure counts (no answer, an overload, a timeout), and the
-  // note drawn from it does not tell those causes apart.
+  // dead. Every failure counts (no answer, an overload, a timeout).
   function lastRefreshFailed() {
     var state = SOURCES.attention.state;
     return state === 'stale' || state === 'dead';
@@ -681,8 +691,15 @@
   // Any state other than a failed refresh means the daemon answered without
   // a current verdict.
   function staleVerdictNote(asOf) {
-    var why = lastRefreshFailed() ? UNREACHABLE_NOTE : 'verdict not current';
+    var why = lastRefreshFailed() ? refreshFailureNote() : 'verdict not current';
     return 'as of ' + verdictTime(asOf) + ' - ' + why;
+  }
+
+  // Why that refresh failed, from its transport kind: an overload and a
+  // timeout name themselves, and any other failure reads as no answer.
+  function refreshFailureNote() {
+    return Object.prototype.hasOwnProperty.call(REFRESH_FAILURE_NOTES, aggregateFailureKind)
+      ? REFRESH_FAILURE_NOTES[aggregateFailureKind] : UNREACHABLE_NOTE;
   }
 
   function verdictTime(asOf) {

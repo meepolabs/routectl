@@ -626,36 +626,65 @@
       });
   });
 
-  // ---- the banner names an overload, never an unreachable daemon ---------
+  // ---- the strip names why a refresh failed ------------------------------
 
-  // A good round, then the aggregate answers 503, then it fails the way an
-  // unreachable daemon does.
-  d.scenario('states-overload-then-unreachable', function () {
+  // How the aggregate fails in each mode: the way an unreachable daemon does,
+  // a 503, or an answer held past the page's own abort budget.
+  var FAILURE_RULES = {
+    unreachable: { fail: true },
+    overloaded: { status: 503 },
+    timeout: { ms: 10000 }
+  };
+
+  function failureObservation() {
+    return {
+      note: textOf('#verdict-note'),
+      banner: bannerShown(),
+      verdict: textOf('#verdict-text')
+    };
+  }
+
+  // A good round, then each mode in turn, observed once a round issued under
+  // that mode has failed: the page issues its next aggregate request only
+  // after the previous answer (or failure) has been handled.
+  function failureSequenceScenario(modes) {
     var mode = null;
     rules.push(function (entry) {
-      if (!isAggregate(entry) || mode === null) { return null; }
-      return mode === 'overloaded' ? { status: 503 } : { fail: true };
+      return (isAggregate(entry) && mode !== null) ? FAILURE_RULES[mode] : null;
     });
-    var out = {};
-    return nextAnswer('/status')
-      .then(function () {
-        mode = 'overloaded';
-        return d.waitUntil('the overload banner', bannerShown, 15000);
-      })
-      .then(function () {
-        out.overloaded = { banner: bannerShown(), unreachable: stripSaysUnreachable() };
-        mode = 'unreachable';
-        return nextAnswer('/status', 40000);
-      })
-      .then(function () { return d.sleep(300); })
-      .then(function () {
-        out.unreachable = {
-          banner: bannerShown(),
-          unreachable: stripSaysUnreachable(),
-          verdict: textOf('#verdict-text')
-        };
-        return out;
+    var steps = [];
+    function failWith(next) {
+      mode = next;
+      var target = requestsIssued('/status') + 2;
+      return d.waitUntil('a failed ' + next + ' round', function () {
+        return requestsIssued('/status') >= target;
+      }, 60000).then(function () {
+        return d.sleep(300);
+      }).then(function () {
+        var seen = failureObservation();
+        seen.mode = next;
+        steps.push(seen);
       });
+    }
+    return modes.reduce(function (chain, next) {
+      return chain.then(function () { return failWith(next); });
+    }, nextAnswer('/status')).then(function () { return { steps: steps }; });
+  }
+
+  d.scenario('states-fails-unreachable', function () {
+    return failureSequenceScenario(['unreachable']);
+  });
+
+  d.scenario('states-fails-overloaded', function () {
+    return failureSequenceScenario(['overloaded']);
+  });
+
+  d.scenario('states-fails-timeout', function () {
+    return failureSequenceScenario(['timeout']);
+  });
+
+  d.scenario('states-fails-overloaded-then-unreachable', function () {
+    return failureSequenceScenario(['overloaded', 'unreachable']);
   });
 
   // ---- an outage while a query is held leaves that query to its answer ---

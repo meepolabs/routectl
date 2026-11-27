@@ -400,6 +400,17 @@ banner, no retry signal -- silently mislabeled data.
   state`. Start the daemon again: within a poll the current sentence
   replaces it, the dimming clears and the icon takes that verdict's color
   again.
+- With a verdict on the status line, make the aggregate answer `503` by
+  wrapping fetch in the devtools console:
+  `var f = window.fetch; window.fetch = function (u, o) { return
+  String(u).endsWith('/status') ? Promise.resolve(new Response('',
+  { status: 503 })) : f(u, o); };`
+  and wait a poll: the line reads `as of <time> - the daemon is overloaded`
+  beside the amber `status overloaded` banner. Reload, then hold the
+  aggregate past 3.5 s instead (devtools network throttling, or a wrapper
+  that never resolves): it reads `as of <time> - the status request timed
+  out` beside the red `timed out` banner. Then stop the daemon: the note
+  turns to `the daemon cannot be reached` and the banner goes.
 - The Models tab badge counts the lanes whose state is not `ok`: two
   logged-out seats on one model badge `2`, and a lane that is both logged
   out and breaker-open counts once. On Traffic, scoped to that seat's

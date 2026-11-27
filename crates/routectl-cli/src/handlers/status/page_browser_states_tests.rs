@@ -83,40 +83,89 @@ fn page_browser_a_failure_on_the_first_round_shows_the_error_card() {
     assert_eq!(result["banner"], Value::Null, "{result:#}");
 }
 
-/// An overloaded daemon puts up its warn banner; once the daemon cannot be
-/// reached at all the banner goes and the strip alone says so. Positive
-/// control: the overload banner showed, so a banner was there to remove.
-/// The strip's note is not cause-specific yet: any failed refresh, an
-/// overload included, reads "the daemon cannot be reached", so during the
-/// overload the note says so beside the banner.
+/// How a refresh that failed after a good round is worded: the verdict stays
+/// on the strip and its note names the failure's cause, while an overload and
+/// a timeout also keep their banner and no answer at all puts up none. Each
+/// row runs the aggregate through its modes in turn and checks the strip
+/// after the last; the overload-then-unreachable row pins that the note
+/// follows the latest failure, and that the overload's banner goes with it.
 ///
-/// Mutation checks: put back `setBanner('error', 'daemon unreachable, backing
-/// off')` for the unreachable case in markTransport -> red; lastRefreshFailed
-/// counting only a dead source -> red (the overload's note is gone).
+/// Mutation checks: drop the `overloaded` row of REFRESH_FAILURE_NOTES ->
+/// red (the overloaded row reads "the daemon cannot be reached"); drop the
+/// `timeout` row -> red (the timed-out row); record the kind only when none
+/// is recorded yet in markTransport -> red (the overloaded-then-unreachable
+/// row keeps the overload note); put back `setBanner('error', 'daemon
+/// unreachable, backing off')` for the unreachable case in markTransport ->
+/// red (the unreachable rows show a banner).
 #[test]
 #[ignore = "drives a system headless Chrome"]
-fn page_browser_an_unreachable_daemon_shows_no_banner_and_an_overload_does() {
-    let result = states_scenario("states-overload-then-unreachable", "now", 90_000);
-    let (overloaded, unreachable) = (&result["overloaded"], &result["unreachable"]);
+fn page_browser_a_failed_refresh_names_its_cause_on_the_strip() {
+    struct Row {
+        scenario: &'static str,
+        note: &'static str,
+        banner: Option<(&'static str, &'static str)>,
+    }
+    const WARN: (&str, &str) = (
+        "banner--warn",
+        "status overloaded: showing last known values, backing off",
+    );
+    const ERROR: (&str, &str) = ("banner--error", "status request timed out, backing off");
+    let rows = [
+        Row {
+            scenario: "states-fails-unreachable",
+            note: "the daemon cannot be reached",
+            banner: None,
+        },
+        Row {
+            scenario: "states-fails-overloaded",
+            note: "the daemon is overloaded",
+            banner: Some(WARN),
+        },
+        Row {
+            scenario: "states-fails-timeout",
+            note: "the status request timed out",
+            banner: Some(ERROR),
+        },
+        Row {
+            scenario: "states-fails-overloaded-then-unreachable",
+            note: "the daemon cannot be reached",
+            banner: None,
+        },
+    ];
+    for row in rows {
+        let result = states_scenario(row.scenario, "now", 150_000);
+        let steps = result["steps"].as_array().expect("observed steps");
+        let last = steps.last().expect("at least one step");
+        let at = row.scenario;
 
-    assert_eq!(
-        overloaded["banner"]["text"], "status overloaded: showing last known values, backing off",
-        "{result:#}"
-    );
-    assert!(
-        text(&overloaded["banner"]["class_name"], "the banner class").contains("banner--warn"),
-        "{result:#}"
-    );
-    assert_eq!(
-        overloaded["unreachable"], true,
-        "the note does not tell an overload from no answer: {result:#}"
-    );
-    assert_eq!(unreachable["banner"], Value::Null, "{result:#}");
-    assert_eq!(unreachable["unreachable"], true, "{result:#}");
-    assert_ne!(
-        unreachable["verdict"], "Checking routing state",
-        "{result:#}"
-    );
+        assert_ne!(
+            last["verdict"], "Checking routing state",
+            "{at}: {result:#}"
+        );
+        let note = text(&last["note"], "the verdict note");
+        assert!(note.starts_with("as of "), "{at}: {result:#}");
+        assert!(note.ends_with(row.note), "{at}: {result:#}");
+        match row.banner {
+            None => assert_eq!(last["banner"], Value::Null, "{at}: {result:#}"),
+            Some((class, banner)) => {
+                assert_eq!(last["banner"]["text"], banner, "{at}: {result:#}");
+                assert!(
+                    text(&last["banner"]["class_name"], "the banner class").contains(class),
+                    "{at}: {result:#}"
+                );
+            }
+        }
+        if steps.len() > 1 {
+            assert_eq!(
+                steps[0]["banner"]["text"], WARN.1,
+                "positive control: the overload put up its banner before the outage: {result:#}"
+            );
+            assert!(
+                text(&steps[0]["note"], "the overload note").ends_with("the daemon is overloaded"),
+                "positive control: the note named the overload first: {result:#}"
+            );
+        }
+    }
 }
 
 /// An invalid health payload puts an error card in every section the host
