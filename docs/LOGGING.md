@@ -249,8 +249,8 @@ For sensitive environments where TRACE is needed but raw prompts are
 not OK to disk, set `ROUTECTL_LOG_REDACT_PROMPTS=1` BEFORE launching
 routectl. The redactor walks every traced body, arrays included, and
 replaces known prompt-bearing fields while preserving structural fields
-(model, tools, sampling params, item and block `type`, `id`, `call_id`,
-`name`, `status`, an action's `type`, `role`,
+(model, tools, sampling params, item and block `type`, `id` (except a
+reasoning item's), `call_id`, `name`, `status`, an action's `type`, `role`,
 finish_reason, usage). A string leaf becomes `<redacted len=N>` (N is
 its character count). A structured tool payload (an object or array
 where a string was expected, such as object-shaped `arguments` or a
@@ -262,9 +262,11 @@ string list under a covered key (`content`, `queries`, `commands`,
 
 The covered fields:
 
-- text blocks, `system`, `instructions`, refusal blocks, audio
-  `transcript`, and a Responses request's `input` when it is one bare
-  string;
+- text blocks and any `text` leaf, message `content` and `output` when a
+  string, `system`, `instructions`, refusal blocks, audio `transcript`,
+  and a Responses request's `input` when it is one bare string;
+- identity fields: the top-level `prompt_cache_key` and `user`, and a
+  `user_id` or `session_id` key at any depth;
 - model reasoning: thinking text, Responses reasoning `summary[*].text`,
   Chat `reasoning` and `reasoning_content` (on `choices[].message`, on
   an assembled stream document and on assistant history turns), and the
@@ -287,15 +289,18 @@ The covered fields:
 - tool output: tool-result and function_call_output content,
   code-execution `stdout` / `stderr`, and the `lines` of a
   `text_editor_code_execution_*_result`;
-- documents and sources: a `document` block's `title` and `context`, a
-  plain-text document source's `data` at any length (including inside a
-  `web_fetch_tool_result`), the `title` of a `web_search_result` or
-  `search_result`, citations and annotations;
+- documents and sources: the `title` and `context` of a `document`,
+  `web_search_result` or `search_result` block, a plain-text document
+  source's `data` at any length (including inside a
+  `web_fetch_tool_result`), citations and annotations;
 - bags collapsed whole: `metadata`, `client_metadata`, Bedrock
   `promptVariables`, and a Responses `prompt.variables`;
-- payloads: image and document source data of 256 bytes or more,
-  `file_data`, image_url data URIs, and reasoning-replay carry blobs
-  (`encrypted_content` and the `redacted_thinking` `data` blob).
+- payloads: image and document source data (`data`, or a Bedrock
+  `source.bytes`) of 256 bytes or more, `file_data`, image_url data URIs
+  over 256 bytes, Bedrock Converse `reasoningContent.redactedContent`,
+  and the reasoning-replay carry artifacts (`encrypted_content`, a
+  `thinking` block's `signature`, the `redacted_thinking` `data` blob and
+  a `reasoning` item's `id`), which are redacted with the knob off too.
 
 Best-effort: unknown wire shapes (a new Anthropic content-block type, a
 new OpenAI Responses output kind) can still leak. The env var is read once on first traced body --

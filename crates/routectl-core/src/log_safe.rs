@@ -1310,47 +1310,12 @@ fn redact_tool_item_fields(map: &mut serde_json::Map<String, serde_json::Value>)
                 redact_tool_payload(input);
             }
         }
-        Some("local_shell_call" | "shell_call") => {
-            if let Some(action) = map.get_mut("action").and_then(|a| a.as_object_mut()) {
-                redact_keys(action, &["command", "commands", "working_directory"]);
-                if let Some(env) = action.get_mut("env") {
-                    *env = redacted_object();
-                }
-            }
-        }
-        Some("custom") => {
-            if let Some(input) = map
-                .get_mut("custom")
-                .and_then(|c| c.as_object_mut())
-                .and_then(|c| c.get_mut("input"))
-            {
-                redact_tool_payload(input);
-            }
-        }
-        Some("apply_patch_call") => {
-            if let Some(operation) = map.get_mut("operation").and_then(|o| o.as_object_mut()) {
-                redact_keys(operation, &["diff", "path"]);
-            }
-        }
-        Some("code_interpreter_call") => {
-            redact_keys(map, &["code"]);
-            if let Some(outputs) = map.get_mut("outputs").and_then(|o| o.as_array_mut()) {
-                for output in outputs.iter_mut().filter_map(|o| o.as_object_mut()) {
-                    redact_keys(output, &["logs"]);
-                }
-            }
-        }
+        Some("local_shell_call" | "shell_call") => redact_shell_action(map),
+        Some("custom") => redact_custom_tool_input(map),
+        Some("apply_patch_call") => redact_child_keys(map, "operation", &["diff", "path"]),
+        Some("code_interpreter_call") => redact_code_interpreter_call(map),
         Some("file_search_call") => redact_keys(map, &["queries"]),
-        // Every action field but `type` (typed text, keys, paths, ...) can
-        // be model-written, so each action collapses whole.
-        Some("computer_call") => {
-            if let Some(action) = map.get_mut("action") {
-                collapse_keeping_type(action);
-            }
-            if let Some(actions) = map.get_mut("actions").and_then(|a| a.as_array_mut()) {
-                actions.iter_mut().for_each(collapse_keeping_type);
-            }
-        }
+        Some("computer_call") => redact_computer_actions(map),
         Some("mcp_call") => redact_keys(map, &["error"]),
         Some("mcp_approval_response") => redact_keys(map, &["reason"]),
         Some("reasoning.summary") => redact_keys(map, &["summary"]),
@@ -1361,13 +1326,60 @@ fn redact_tool_item_fields(map: &mut serde_json::Map<String, serde_json::Value>)
         }
         // `url` too: an opened page's address can carry the query.
         Some("web_search_call") => {
-            if let Some(action) = map.get_mut("action").and_then(|a| a.as_object_mut()) {
-                redact_keys(action, &["query", "queries", "pattern", "url"]);
-            }
+            redact_child_keys(map, "action", &["query", "queries", "pattern", "url"]);
         }
         Some("image_generation_call") => redact_keys(map, &["revised_prompt", "result"]),
         _ => {}
     }
+    redact_gemini_tool_payloads(map);
+}
+
+/// A shell call's `action`: the command text, its working directory and
+/// the whole `env` bag.
+fn redact_shell_action(map: &mut serde_json::Map<String, serde_json::Value>) {
+    if let Some(action) = map.get_mut("action").and_then(|a| a.as_object_mut()) {
+        redact_keys(action, &["command", "commands", "working_directory"]);
+        if let Some(env) = action.get_mut("env") {
+            *env = redacted_object();
+        }
+    }
+}
+
+/// A Chat `type:"custom"` tool call's `custom.input`.
+fn redact_custom_tool_input(map: &mut serde_json::Map<String, serde_json::Value>) {
+    if let Some(input) = map
+        .get_mut("custom")
+        .and_then(|c| c.as_object_mut())
+        .and_then(|c| c.get_mut("input"))
+    {
+        redact_tool_payload(input);
+    }
+}
+
+/// A code-interpreter call's `code` and the `logs` of each output.
+fn redact_code_interpreter_call(map: &mut serde_json::Map<String, serde_json::Value>) {
+    redact_keys(map, &["code"]);
+    if let Some(outputs) = map.get_mut("outputs").and_then(|o| o.as_array_mut()) {
+        for output in outputs.iter_mut().filter_map(|o| o.as_object_mut()) {
+            redact_keys(output, &["logs"]);
+        }
+    }
+}
+
+/// Every action field but `type` (typed text, keys, paths, ...) can be
+/// model-written, so `action` and each of `actions` collapse whole.
+fn redact_computer_actions(map: &mut serde_json::Map<String, serde_json::Value>) {
+    if let Some(action) = map.get_mut("action") {
+        collapse_keeping_type(action);
+    }
+    if let Some(actions) = map.get_mut("actions").and_then(|a| a.as_array_mut()) {
+        actions.iter_mut().for_each(collapse_keeping_type);
+    }
+}
+
+/// Gemini parts carry no `type`: a `functionCall`'s `args` and a
+/// `functionResponse`'s `response` are found by their parent key.
+fn redact_gemini_tool_payloads(map: &mut serde_json::Map<String, serde_json::Value>) {
     if let Some(call) = map.get_mut("functionCall").and_then(|c| c.as_object_mut())
         && let Some(args) = call.get_mut("args")
     {
@@ -1379,6 +1391,17 @@ fn redact_tool_item_fields(map: &mut serde_json::Map<String, serde_json::Value>)
         && let Some(response) = reply.get_mut("response")
     {
         redact_tool_payload(response);
+    }
+}
+
+/// [`redact_keys`] on the object under `parent`, when there is one.
+fn redact_child_keys(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    parent: &str,
+    keys: &[&str],
+) {
+    if let Some(child) = map.get_mut(parent).and_then(|c| c.as_object_mut()) {
+        redact_keys(child, keys);
     }
 }
 

@@ -1344,6 +1344,23 @@ fn redact_source_and_document_titles() {
             ],
         ),
         (
+            "anthropic web_search_result context",
+            json!({"content": [{"type": "web_search_tool_result", "tool_use_id": "srvtoolu_5",
+                "content": [{"type": "web_search_result", "title": "t",
+                "url": "https://example.com/page", "context": format!("about {s}")}]}]}),
+            vec![
+                ("/content/0/tool_use_id", json!("srvtoolu_5")),
+                ("/content/0/content/0/type", json!("web_search_result")),
+            ],
+        ),
+        (
+            "anthropic search_result context",
+            json!({"messages": [{"role": "user", "content": [{"type": "search_result",
+                "source": "https://example.com/kb", "title": "t",
+                "context": format!("about {s}"), "content": []}]}]}),
+            vec![("/messages/0/content/0/type", json!("search_result"))],
+        ),
+        (
             "anthropic document context",
             json!({"messages": [{"role": "user", "content": [{"type": "document",
                 "source": {"type": "url", "url": "https://example.com/a.pdf"},
