@@ -41,7 +41,9 @@ use crate::server::usage_poll::{PollStateSnapshot, UsagePollState};
 
 /// Wire-shape version of the attention panel payload. A removed field, or a
 /// field or token whose meaning changes, bumps it; an added field or kind
-/// does not.
+/// does not. Readers outside the daemon follow the reader rule in
+/// `commands/doctor/daemon_attention.rs` and docs/CONFIGURATION.md
+/// ("Needs-attention list on `/status/attention`").
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// How long after daemon start a seat driver that has never swept still
