@@ -44,41 +44,148 @@
 
   // Every /status answer carries the attention panel of the first one, so
   // both views draw their lists from one payload whichever round each read.
+  // Setting `clear` serves that panel with nothing in it from then on.
   function freezeAttention() {
-    var frozen = { panel: null };
+    var frozen = { panel: null, clear: false };
     d.rewrite(function (url, text) {
       if (url.pathname !== '/status') { return text; }
       var agg = JSON.parse(text);
       if (!frozen.panel) { frozen.panel = agg.panels.attention; }
-      agg.panels.attention = frozen.panel;
+      agg.panels.attention = frozen.clear ? clearedAttention(frozen.panel) : frozen.panel;
       return JSON.stringify(agg);
     });
     return frozen;
   }
 
+  function clearedAttention(panel) {
+    var cleared = JSON.parse(JSON.stringify(panel));
+    cleared.data.items = [];
+    Object.keys(cleared.data.counts).forEach(function (key) { cleared.data.counts[key] = 0; });
+    return cleared;
+  }
+
+  // Every /status answer's doctor report carries only its passing checks.
+  function passesOnly() {
+    d.rewrite(function (url, text) {
+      if (url.pathname !== '/status') { return text; }
+      var agg = JSON.parse(text);
+      var report = agg.panels.doctor.data.report;
+      report.findings = report.findings.filter(function (f) { return f.status === 'Pass'; });
+      return JSON.stringify(agg);
+    });
+  }
+
+  function attentionSectionNode() {
+    return document.querySelector('#body-doctor [data-source="attention"]');
+  }
+
+  // The Doctor section head over the attention list: its count, its dot, its
+  // accessible name, and the tab badge beside it.
+  function doctorHead() {
+    var section = attentionSectionNode();
+    var head = section && section.querySelector('.card-head');
+    var dot = head && head.querySelector('.docdot');
+    var badge = document.getElementById('badge-doctor');
+    return {
+      count: head ? textOrNull('#body-doctor [data-source="attention"] .card-head .docattn-count') : null,
+      name: head ? d.accessibleName(head.querySelector('.card-title')) : null,
+      dot: dot ? dot.className : null,
+      badge: badge.hidden ? null : badge.textContent,
+      clear_line: section ? section.querySelectorAll('.attn-clear').length : null,
+      head_lines: section ? section.querySelectorAll('.card-head').length : null
+    };
+  }
+
   // Now draws its list, then the Doctor tab is opened and draws its own;
-  // both stay in the document, the Now pane hidden.
+  // both stay in the document, the Now pane hidden. The attention panel is
+  // then served empty and the Doctor head read again.
   d.scenario('doctor-same-list', function () {
     var frozen = freezeAttention();
+    var out = {};
     return waitForItems('body-now').then(function () {
       document.getElementById('tab-doctor').click();
       return waitForItems('body-doctor');
     }).then(function () {
-      var badge = document.getElementById('badge-doctor');
+      out.now = keysIn('body-now');
+      out.doctor = keysIn('body-doctor');
+      out.duplicate_ids = duplicateIds();
+      out.active = doctorHead();
+      out.served_counts = frozen.panel.data.counts;
+      out.served_keys = frozen.panel.data.items.map(function (item) { return item.key; });
+      out.doctor_findings = document.querySelectorAll('#body-doctor .docfinding').length;
+      out.doctor_text = document.getElementById('body-doctor').textContent;
+      out.old_headline_unit = !!document.querySelector('#body-doctor [data-unit="headline"]');
+      frozen.clear = true;
+      return d.waitUntil('the doctor attention list emptied', function () {
+        return itemsIn('body-doctor').length === 0 &&
+          textOrNull('#body-doctor [data-source="attention"] .docattn-count') === '0';
+      });
+    }).then(function () {
+      out.healthy = doctorHead();
+      out.healthy_text = attentionSectionNode().textContent;
+      return out;
+    });
+  });
+
+  // The report's checks all pass while the attention list has items, then
+  // the attention panel is served empty: the checks' all-clear is read in
+  // both states.
+  d.scenario('doctor-checks-card', function () {
+    var frozen = freezeAttention();
+    passesOnly();
+    function checksState() {
+      var body = document.getElementById('body-doctor');
+      var doctor = body.querySelector('[data-source="doctor"]');
+      var line = doctor.querySelector('.docchecks');
       return {
-        now: keysIn('body-now'),
-        doctor: keysIn('body-doctor'),
-        duplicate_ids: duplicateIds(),
-        headline: textOrNull('#body-doctor .dochead-count'),
-        badge: badge.hidden ? null : badge.textContent,
-        served_counts: frozen.panel.data.counts,
-        served_keys: frozen.panel.data.items.map(function (item) { return item.key; }),
-        doctor_findings: document.querySelectorAll('#body-doctor .docfinding').length,
-        old_headline_gone: !document.querySelector('#body-doctor .doccounts .doccount-label') ||
-          Array.prototype.every.call(
-            document.querySelectorAll('#body-doctor .doccount-label'),
-            function (n) { return ['failed', 'warnings', 'passed'].indexOf(n.textContent) < 0; })
+        badge: doctorHead().badge,
+        line: line ? line.textContent : null,
+        cards: Array.prototype.map.call(doctor.querySelectorAll('.card.empty .empty-title'),
+          function (n) { return n.textContent; }),
+        findings: doctor.querySelectorAll('.docfinding').length,
+        passes: textOrNull('#doctor-passes summary')
       };
+    }
+    var out = {};
+    return d.waitUntil('doctor checks drawn beside attention items', function () {
+      return itemsIn('body-doctor').length > 0 && document.querySelector('#doctor-passes');
+    }).then(function () {
+      out.active = checksState();
+      frozen.clear = true;
+      return d.waitUntil('the full all-clear card', function () {
+        return document.querySelector('#body-doctor [data-source="doctor"] .card.empty');
+      });
+    }).then(function () {
+      out.healthy = checksState();
+      return out;
+    });
+  });
+
+  // The doctor panel's reachability replaced by the row's list, then by the
+  // row's `next` list, which carries a verdict this build does not know.
+  d.scenario('doctor-reach', function () {
+    var row = window.routectlDoctorRow;
+    var state = { list: row.reachability };
+    d.rewrite(function (url, text) {
+      if (url.pathname !== '/status') { return text; }
+      var agg = JSON.parse(text);
+      agg.panels.doctor.data.reachability = state.list;
+      return JSON.stringify(agg);
+    });
+    var out = {};
+    return d.waitUntil('the reachability line', function () {
+      return document.querySelector('#body-doctor .docreach');
+    }).then(function (line) {
+      out.line = line.textContent;
+      state.list = row.next;
+      return d.waitUntil('the doctor section after an unknown verdict', function () {
+        return !document.querySelector('#body-doctor .docreach');
+      });
+    }).then(function () {
+      var section = document.querySelector('#body-doctor [data-source="doctor"]');
+      out.after = section.textContent;
+      out.after_error = !!section.querySelector('.unavailable-msg');
+      return out;
     });
   });
 

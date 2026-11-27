@@ -9,38 +9,48 @@
 
   // The reachability verdicts the panel folds from each target's last settled
   // outcome, worst-known-first for the summary line. Same fail-closed posture
-  // as the severities above.
+  // as the severities above. A token reads as itself unless REACH_WORDS
+  // names a plainer word for it.
   var REACHABILITY_TOKENS = ['reachable', 'degraded', 'unknown'];
+  var REACH_WORDS = { unknown: 'not used yet' };
 
-  // The needs-attention part of the view, from the attention source: one
-  // headline number, the daemon's own active tally, over the shared list. It
-  // is the number the tab badge shows, so the view never shows a second
-  // problem count beside it.
+  // The needs-attention part of the view, from the attention source: the
+  // shared list under a head that carries the daemon's own active tally and
+  // a dot in its worst severity's color. It is the number the tab badge
+  // shows, so the view never shows a second problem count beside it; the
+  // head alone says when nothing is active.
   function doctorAttentionSection(rec) {
-    var wrap = document.createElement('div');
-    wrap.className = 'tabstack';
-    wrap.appendChild(doctorHeadline(attentionTally(rec.data.counts)));
-    wrap.appendChild(attentionSection(rec, 'doctor'));
-    return wrap;
+    var counts = attentionTally(rec.data.counts);
+    return attentionSectionWith(rec, 'doctor', doctorAttentionHead(counts), null);
   }
 
-  function doctorHeadline(counts) {
+  function doctorAttentionHead(counts) {
     var active = counts.broken + counts.degraded;
-    var card = markRefreshUnit(document.createElement('div'), 'headline');
-    card.className = 'card docverdict';
-    var lead = document.createElement('div');
-    lead.className = 'docverdict-lead';
+    var head = markRefreshUnit(sectionHead('Needs attention', null), 'attention-head');
+    var title = head.querySelector('.card-title');
+    title.classList.add('docattn-title');
+    title.appendChild(document.createTextNode(' '));
     var dot = document.createElement('span');
     dot.className = 'docdot docdot--' + (counts.broken ? 'bad' : (counts.degraded ? 'warn' : 'ok'));
     dot.setAttribute('aria-hidden', 'true');
-    var head = document.createElement('span');
-    head.className = 'docverdict-head';
-    head.appendChild(docText('dochead-count', String(active)));
-    head.appendChild(document.createTextNode(active === 1 ? ' item needs attention' : ' items need attention'));
-    lead.appendChild(dot);
-    lead.appendChild(head);
-    card.appendChild(lead);
-    return card;
+    title.appendChild(dot);
+    var count = docText('docattn-count', String(active));
+    if (!active) { count.classList.add('mag-zero'); }
+    title.appendChild(count);
+    return head;
+  }
+
+  // Whether the attention source holds a readable answer with nothing
+  // active, or null while it holds none: its own section reports why.
+  function attentionAllClear() {
+    var rec = SOURCES.attention;
+    if (stateCard(rec)) { return null; }
+    try {
+      var counts = attentionTally(rec.data.counts);
+      return counts.broken + counts.degraded === 0;
+    } catch (e) {
+      return null;
+    }
   }
 
   // The doctor section FAILS CLOSED as a whole: an unrecognized severity
@@ -67,7 +77,7 @@
     var stack = tabStack();
     stack.appendChild(doctorReach(rec.data.reachability));
     if (attention.length) { stack.appendChild(doctorFindings(attention)); }
-    else if (passes.length) { stack.appendChild(doctorAllClear(passes.length)); }
+    else if (passes.length) { stack.appendChild(doctorAllClear(passes.length, attentionAllClear() === false)); }
     else { stack.appendChild(doctorNoChecks()); }
     if (passes.length) { stack.appendChild(doctorPasses(passes)); }
     stack.appendChild(doctorCapWrites(rec.data.capability_writes));
@@ -108,21 +118,33 @@
   // The reachability rollup, which is the ONLY reachability reading on the
   // page: the per-target last outcome it folds is the Models view's subject, so
   // repeating those rows here would show the same fact twice.
+  //
+  // Each verdict is one route's last settled client request since the daemon
+  // started: the doctor dials nothing, and background capability probes
+  // neither credit nor debit a route. A route stays `unknown` until a request
+  // ends in success or in a failure that counts against its circuit, so a
+  // route that only ever saw a 400 still reads "not used yet".
+  var REACH_LEAD = 'Routes, from real traffic since the daemon started (Doctor sends no test requests): ';
+
   function doctorReach(reachability) {
     var line = markRefreshUnit(document.createElement('p'), 'reach');
     line.className = 'docverdict-sub docreach';
-    line.textContent = 'no-network checks - ' + reachSummary(reachability);
+    line.textContent = REACH_LEAD + reachSummary(reachability);
     return line;
   }
 
   function reachSummary(reachability) {
-    if (!reachability.length) { return 'no dispatch target resolved yet'; }
+    if (!reachability.length) { return 'none resolved yet'; }
     var parts = [];
     REACHABILITY_TOKENS.forEach(function (token) {
       var n = reachability.filter(function (t) { return t.reachability === token; }).length;
-      if (n) { parts.push(n + ' ' + token); }
+      if (n) { parts.push(n + ' ' + reachWord(token)); }
     });
-    return 'last settled outcome: ' + parts.join(', ');
+    return parts.join(', ');
+  }
+
+  function reachWord(token) {
+    return REACH_WORDS[token] || token;
   }
 
   // A zero count reads faint: no failures is the good state, so it must not
@@ -280,12 +302,22 @@
 
   // No check to act on. Explicit that the passing checks below are what this
   // rests on, and titled for the checks alone: the needs-attention list
-  // above can still carry items the checks do not cover.
-  function doctorAllClear(passCount) {
+  // above can still carry items the checks do not cover. While it does, the
+  // checks' all-clear is one quiet line, so it never outweighs that list.
+  function doctorAllClear(passCount, isAttentionActive) {
+    if (isAttentionActive) { return doctorChecksLine(); }
     return emptyCard('Every check passed',
       countText(passCount, ' check ran', ' checks ran') + ' and none of them reported a ' +
       'problem. A warning or a failure appears here the moment one does.',
       ['current state', 'no upstream was dialed']);
+  }
+
+  // The count is left to the passes disclosure right below it.
+  function doctorChecksLine() {
+    var line = document.createElement('p');
+    line.className = 'docverdict-sub docchecks';
+    line.textContent = 'Doctor\'s own checks: none reported a problem (no upstream was dialed).';
+    return line;
   }
 
   // A report with no check at all: nothing is known to be wrong, and nothing

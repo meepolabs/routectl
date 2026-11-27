@@ -47,8 +47,11 @@ has not verified the failure that matters most.
   scoped Traffic).
 - **The Doctor view** (`dash_73_tab_doctor.js`):
   `page_browser_doctor_tests.rs` (the same attention items as Now under
-  their own ids, one headline number equal to the tab badge, and quoted
-  remediation commands drawn as bare focusable code).
+  their own ids, the "Needs attention" head's count equal to the tab badge
+  with and without active items, the "Every check passed" card shrunk to one
+  line while anything needs attention, the reachability line's plain words
+  with `unknown` read as "not used yet", and quoted remediation commands
+  drawn as bare focusable code).
 - **The address and the views** (`dash_90_chrome.js`):
   `page_browser_url_tests.rs` and `page_browser_views_tests.rs`.
 - **Figures read in full at each text size** (`dash_*.css`):
@@ -223,7 +226,21 @@ banner, no retry signal -- silently mislabeled data.
   notes wrap instead of truncating, and hovering each shows the full
   sentence.
 
-## 5. Doctor tab capability writes
+## 5. Doctor tab
+
+- With a logged-out seat (one degraded item), the Doctor tab opens on the
+  "Needs attention" head with an amber dot and `1`, the same number as the
+  tab badge, and no separate count card above it. The doctor checks read as
+  one line, `Doctor's own checks: none reported a problem (no upstream was
+  dialed).`, not as the large "Every check passed" card.
+- On a healthy daemon the head reads `Needs attention` with a green dot and a
+  faint `0` and nothing under it; the full "Every check passed" card shows.
+- The reachability line reads `Routes, from real traffic since the daemon
+  started (Doctor sends no test requests): ...`. Right after a restart every
+  route reads `not used yet`; a route whose request succeeds moves
+  to `reachable`.
+
+### Capability writes
 
 - The capability-writes card shows three separate counters, all faint at
   zero on a healthy daemon. The Doctor tab shows no capability matrix: what

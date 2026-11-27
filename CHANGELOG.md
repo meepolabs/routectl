@@ -484,6 +484,12 @@ list with more narrative.
 
 - **The sort hint on a dashboard table header sits inside its focus ring.** Each sortable header keeps room for its mark after the label, so the faint `^v` shown on hover or keyboard focus, and the sorted header's `^` or `v`, draw inside the focus ring, and a header never changes width when the hint appears.
 
+- **The dashboard Doctor tab carries its attention count in the "Needs attention" head.** The separate "N items need attention" card above the list is gone; the section head reads `Needs attention`, a dot in the worst active severity's color and the count, which is still the number the Doctor tab badge shows. With nothing active the head reads `Needs attention 0` on its own, with no "Nothing needs attention now." line under it.
+
+- **The dashboard Doctor "Every check passed" card gives way while anything needs attention.** When every doctor check passed but the attention list has an active item, the card is replaced by one line, `Doctor's own checks: none reported a problem (no upstream was dialed).`; with nothing needing attention the full card is shown as before.
+
+- **The dashboard Doctor reachability line says what it reports.** It reads `Routes, from real traffic since the daemon started (Doctor sends no test requests): ...` with a count per verdict, and a route with no settled request yet reads `not used yet` instead of `unknown`. The `/status/doctor` `reachability` tokens are unchanged.
+
 - **The dashboard marks only the sorted column header.** A sortable header that is not the sorted one no longer carries a sort mark at rest; it shows a faint `^v` while hovered or keyboard-focused, and the sorted header keeps its `^` or `v`. This applies on every sortable table (Traffic and Config).
 
 - **Dashboard row toggles on Models are named by what the row shows.** Each lane's expand button is announced as `Details for <nicknames> on <provider>`, the nickname and provider cells of the row, instead of the internal lane key. Row ids and addresses are unchanged. Traffic and Config already named their toggles by the row's own label.

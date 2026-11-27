@@ -226,7 +226,12 @@ fn section_wrappers_mark_themselves_as_refresh_units() {
         compact(&function_body("modelsSection"))
             .contains("markrefreshunit(document.createelement('div'),'models-lanes')")
     );
-    for name in ["doctorHeadline", "doctorFindings", "doctorPasses"] {
+    assert!(
+        compact(&function_body("doctorAttentionHead"))
+            .contains("markrefreshunit(sectionhead('needsattention',null),'attention-head')"),
+        "doctorAttentionHead marks its head"
+    );
+    for name in ["doctorFindings", "doctorPasses"] {
         assert!(
             function_body(name).contains("markRefreshUnit(document.createElement('div'), '"),
             "{name} marks its wrapper"

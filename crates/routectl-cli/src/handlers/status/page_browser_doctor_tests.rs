@@ -1,6 +1,8 @@
 // The Doctor view in a real headless Chrome: the daemon's needs-attention
-// list drawn as Now draws it under its own id prefix, one headline number
-// that is the tab badge's, finding remediations whose backtick-quoted
+// list drawn as Now draws it under its own id prefix, its section head
+// carrying the one number that is the tab badge's, the checks' all-clear
+// shrunk to a line while anything needs attention, the reachability line in
+// plain words, finding remediations whose backtick-quoted
 // commands are copyable code with the backticks left out, and a
 // model-problem number equal to the Models view's cause lines beside a lane
 // number equal to the Models tab badge. `include!`d into a
@@ -60,15 +62,20 @@ fn id_key(raw: &str) -> String {
 
 /// From one attention payload, Now and Doctor draw the same items in the
 /// same order, each under its own id prefix, so no id appears twice on the
-/// page. Doctor's one headline number is its tab badge and the daemon's
-/// active tally (broken + degraded); the Fail/Warn/Pass headline is gone
-/// while the report's findings still render (positive control).
+/// page. Doctor's one count sits in its "Needs attention" section head with
+/// a dot in the worst active severity, and equals its tab badge and the
+/// daemon's active tally (broken + degraded); no headline card is drawn
+/// above it, and the Fail/Warn/Pass headline is gone while the report's
+/// findings still render (positive control). Served an empty panel, the head
+/// reads 0 beside a hidden badge, as one line with no "Nothing needs
+/// attention now." under it.
 ///
 /// Mutation checks: pass 'now' as the Doctor prefix -> red (duplicate ids);
-/// add `counts.recovered` to the headline -> red.
+/// add `counts.recovered` to the head count -> red; pass attentionClear() as
+/// the Doctor section's lead -> red (the healthy case is two lines).
 #[test]
 #[ignore = "drives a system headless Chrome"]
-fn page_browser_doctor_lists_now_items_under_its_own_ids_and_headlines_the_badge() {
+fn page_browser_doctor_lists_now_items_under_its_own_ids_and_heads_them_with_the_badge() {
     let out = doctor_scenario("doctor-same-list", "now", None);
 
     let now = keys_of(&out["now"], "now");
@@ -84,20 +91,124 @@ fn page_browser_doctor_lists_now_items_under_its_own_ids_and_headlines_the_badge
     assert_eq!(doctor, served, "{out:#}");
     assert_eq!(out["duplicate_ids"], json!([]), "{out:#}");
     let counts = &out["served_counts"];
-    let active =
-        counts["broken"].as_u64().expect("broken") + counts["degraded"].as_u64().expect("degraded");
+    let broken = counts["broken"].as_u64().expect("broken");
+    let active = broken + counts["degraded"].as_u64().expect("degraded");
     assert!(active > 0, "positive control: active items: {out:#}");
     assert!(
         counts["recovered"].as_u64().expect("recovered") > 0,
         "positive control: a recovered item the count leaves out: {out:#}"
     );
-    assert_eq!(out["headline"], active.to_string(), "{out:#}");
-    assert_eq!(out["badge"], out["headline"], "{out:#}");
-    assert_eq!(out["old_headline_gone"], true, "{out:#}");
+    let head = &out["active"];
+    assert_eq!(head["count"], active.to_string(), "{out:#}");
+    assert_eq!(head["badge"], head["count"], "{out:#}");
+    assert_eq!(head["name"], format!("Needs attention {active}"), "{out:#}");
+    let tone = if broken > 0 { "bad" } else { "warn" };
+    assert_eq!(head["dot"], format!("docdot docdot--{tone}"), "{out:#}");
+    assert_eq!(head["head_lines"], 1, "{out:#}");
+    assert_eq!(out["old_headline_unit"], false, "{out:#}");
+    let text = out["doctor_text"].as_str().expect("doctor text");
+    assert!(!text.contains("item needs attention"), "{out:#}");
+    assert!(!text.contains("items need attention"), "{out:#}");
     assert!(
         out["doctor_findings"].as_u64().expect("findings") > 0,
         "positive control: the report's findings still render: {out:#}"
     );
+
+    let healthy = &out["healthy"];
+    assert_eq!(healthy["count"], "0", "{out:#}");
+    assert_eq!(
+        healthy["badge"],
+        Value::Null,
+        "the badge hides at zero: {out:#}"
+    );
+    assert_eq!(healthy["name"], "Needs attention 0", "{out:#}");
+    assert_eq!(healthy["dot"], "docdot docdot--ok", "{out:#}");
+    assert_eq!(healthy["head_lines"], 1, "{out:#}");
+    assert_eq!(healthy["clear_line"], 0, "{out:#}");
+    assert_eq!(
+        out["healthy_text"], "Needs attention 0",
+        "one line: {out:#}"
+    );
+}
+
+/// While the attention list has items and every check passed, the checks'
+/// all-clear is one line about Doctor's own checks and no all-clear card is
+/// drawn; once nothing needs attention, the full "Every check passed" card
+/// is back and the line is gone. The passing checks stay behind their
+/// disclosure in both states.
+///
+/// Mutation check: drop the doctorChecksLine return from doctorAllClear
+/// (always draw the card) -> red (the active case draws the card).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_doctor_shrinks_the_checks_all_clear_while_anything_needs_attention() {
+    let out = doctor_scenario("doctor-checks-card", "doctor", None);
+
+    let active = &out["active"];
+    assert!(
+        active["badge"].as_str().is_some_and(|b| b != "0"),
+        "premise: something needs attention: {out:#}"
+    );
+    assert_eq!(active["findings"], 0, "premise: no failing check: {out:#}");
+    assert_eq!(
+        active["line"], "Doctor's own checks: none reported a problem (no upstream was dialed).",
+        "{out:#}"
+    );
+    assert_eq!(active["cards"], json!([]), "{out:#}");
+    assert_eq!(active["passes"], "1 check passed", "{out:#}");
+
+    let healthy = &out["healthy"];
+    assert_eq!(
+        healthy["badge"],
+        Value::Null,
+        "premise: nothing active: {out:#}"
+    );
+    assert_eq!(healthy["line"], Value::Null, "{out:#}");
+    assert_eq!(healthy["cards"], json!(["Every check passed"]), "{out:#}");
+    assert_eq!(healthy["passes"], "1 check passed", "{out:#}");
+}
+
+fn reach(state_key: &str, verdict: &str) -> Value {
+    json!({ "state_key": state_key, "reachability": verdict })
+}
+
+/// The reachability line says what it reports in words: routes, read from
+/// real traffic, with no test request sent. The `unknown` verdict reads "not
+/// used yet" while `reachable` and `degraded`, which have no other word,
+/// read as themselves, in the line's fixed order with each count. A verdict
+/// this build does not know is not dropped from the count: the doctor
+/// section stops drawing and says it could not read the payload.
+///
+/// Mutation checks: drop the `unknown` entry from REACH_WORDS -> red (the
+/// line reads "2 unknown"); make reachWord return '' for a token with no
+/// word -> red (reachable and degraded lose their word); let validatedReport
+/// accept any reachability token -> red (the unknown verdict is drawn past).
+#[test]
+#[ignore = "drives a system headless Chrome"]
+fn page_browser_doctor_reachability_line_reads_in_plain_words() {
+    let out = doctor_scenario(
+        "doctor-reach",
+        "doctor",
+        Some(json!({
+            "reachability": [
+                reach("a", "unknown"),
+                reach("b", "reachable"),
+                reach("c", "unknown"),
+                reach("d", "degraded"),
+            ],
+            "next": [reach("a", "reachable"), reach("b", "rerouted")],
+        })),
+    );
+
+    assert_eq!(
+        out["line"],
+        "Routes, from real traffic since the daemon started (Doctor sends no test \
+         requests): 1 reachable, 1 degraded, 2 not used yet",
+        "{out:#}"
+    );
+    assert_eq!(out["after_error"], true, "{out:#}");
+    let after = out["after"].as_str().expect("section text");
+    assert!(!after.contains("Routes, from real traffic"), "{out:#}");
 }
 
 fn warn(detail: &str, remediation: &str) -> Value {

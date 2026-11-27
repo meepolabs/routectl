@@ -326,19 +326,10 @@ td > .hchips { max-width: 24rem; }
    each finding is a separate object an operator acts on, so each gets its
    own card. State color rides the dot, the severity pill, and (for a
    failure only) the card border -- a card never floods with it. */
-.docverdict {
-  display: flex;
+.docattn-title {
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-5);
-  flex-wrap: wrap;
-}
-.docverdict-lead {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  flex: 1 1 var(--fb-docverdict);
-  min-width: 0;
+  gap: var(--sp-2);
 }
 .docdot {
   width: 9px;
@@ -350,20 +341,14 @@ td > .hchips { max-width: 24rem; }
 .docdot--ok { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
 .docdot--warn { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
 .docdot--bad { background: var(--neg); box-shadow: 0 0 0 3px var(--neg-soft); }
-.docdot--unknown { background: var(--border-strong); }
-.docverdict-head {
-  font-size: var(--fs-lg);
-  color: var(--fg);
-  min-width: 0;
-}
 .docverdict-sub {
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   color: var(--faint);
   overflow-wrap: anywhere;
 }
-.docreach { margin: 0; }
-.dochead-count {
+.docreach, .docchecks { margin: 0; }
+.docattn-count {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }

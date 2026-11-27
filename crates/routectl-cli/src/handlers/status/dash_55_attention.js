@@ -12,20 +12,31 @@
   var MINUTE_MS = 60000;
 
   function attentionSection(rec, idPrefix) {
-    var data = rec.data;
-    if (!Array.isArray(data.items)) {
-      throw new Error('attention payload carries no item list');
-    }
-    var counts = attentionTally(data.counts);
+    var items = attentionItems(rec);
+    var head = sectionHead('Needs attention', null);
+    head.appendChild(attentionCounts(attentionTally(rec.data.counts)));
+    var active = items.filter(function (item) { return item.state !== 'recovered'; });
+    return attentionSectionWith(rec, idPrefix, head, active.length ? null : attentionClear());
+  }
+
+  // The section shell a view heads its own way: `head`, then `lead` when
+  // given, then the list.
+  function attentionSectionWith(rec, idPrefix, head, lead) {
+    var items = attentionItems(rec);
     var wrap = document.createElement('div');
     wrap.className = 'ovsection attn';
-    var head = sectionHead('Needs attention', null);
-    head.appendChild(attentionCounts(counts));
     wrap.appendChild(head);
-    var active = data.items.filter(function (item) { return item.state !== 'recovered'; });
-    if (!active.length) { wrap.appendChild(attentionClear()); }
-    if (data.items.length) { wrap.appendChild(attentionList(data.items, idPrefix, panelNowMs(rec))); }
+    if (lead) { wrap.appendChild(lead); }
+    if (items.length) { wrap.appendChild(attentionList(items, idPrefix, panelNowMs(rec))); }
     return wrap;
+  }
+
+  function attentionItems(rec) {
+    var items = rec.data.items;
+    if (!Array.isArray(items)) {
+      throw new Error('attention payload carries no item list');
+    }
+    return items;
   }
 
   // The tally of what is active now, as the daemon counted it. Recovered
