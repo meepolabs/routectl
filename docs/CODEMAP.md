@@ -880,12 +880,13 @@ license.
   re-exported from `anthropic_api` for the router's beta-override advisory),
   `CLEAR_THINKING_EDIT_TYPE`, `THINKING_CACHE_CAP`, `THINKING_CACHE_TTL`,
   `snapshot_to_cache`, `lookup_thinking`, `extract_tool_thinking`,
-  `apply_clear_thinking_edit` (the reinjection path routes its
-  `redacted_thinking` data through the shared `EnvelopeUnwrapTally`)
+  `apply_clear_thinking_edit` (the reinjection path asks the shared
+  `ForeignEnvelopeTally` before building a `redacted_thinking` block)
 - `src/anthropic_api/envelope_policy.rs` -- host-gated reasoning-envelope
-  policy for the `redacted_thinking` egress: `EnvelopeUnwrapTally` owns the
-  resolved terminal-host bool, `wire_data` (unwrap to the inner blob on the
-  genuine Anthropic host, verbatim everywhere else), and one aggregated DEBUG
+  policy for the `redacted_thinking` egress: `ForeignEnvelopeTally` owns the
+  resolved terminal-host bool, `omits` / `omit` (a block carrying a routectl
+  envelope is omitted on the genuine Anthropic host and kept verbatim
+  everywhere else; any other data ships unchanged), and one aggregated DEBUG
   line per request carrying only a constant event name, the provider id, and a
   count. Owned by `request::normalize` and threaded into every construction
   site of a `redacted_thinking` block (content parts, the
@@ -902,7 +903,7 @@ license.
   forward-vs-lift decision for `Role::System` turns (resolved from
   canonical-`system` presence, threaded into message translation as
   `SystemTurnPolicy`), the per-request
-  `EnvelopeUnwrapTally` (threaded into message translation and cache
+  `ForeignEnvelopeTally` (threaded into the replay-invariant pass and cache
   reinjection, flushed once after both), and cache_control
   breakpoint validation (`validate_breakpoints`); re-exports
   `translate_tool`, `translate_system`, `lift_legacy_system_stripped`,
@@ -947,8 +948,9 @@ license.
   shipped choice)
 - `src/anthropic_api/messages.rs` -- per-role content-block translation:
   `translate_messages`, `build_assistant_content`, `emit_reasoning_blocks`,
-  `build_tool_message`, `normalize_replay_invariants`; owns
-  `SystemTurnPolicy` (forward a mid-conversation `role: "system"` turn in
+  `build_tool_message`, `normalize_replay_invariants` (strips unsigned
+  thinking and omits foreign reasoning envelopes, dropping a turn left
+  empty); owns `SystemTurnPolicy` (forward a mid-conversation `role: "system"` turn in
   place vs treat it as lift-consumed, resolved by `request.rs`), the
   billing/attribution and empty-turn screen on the forwarded path (also
   applied to a `developer` turn via `emit_other_role_turn`), and the

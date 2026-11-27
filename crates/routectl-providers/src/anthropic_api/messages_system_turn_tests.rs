@@ -104,13 +104,8 @@ fn st_roles(out: &[AnthropicMessage]) -> Vec<&'static str> {
 }
 
 fn st_forward(messages: &[Message]) -> Vec<AnthropicMessage> {
-    translate_messages_untallied(
-        "anthropic",
-        messages,
-        SystemTurnPolicy::Forward,
-        &mut passthrough_tally(),
-    )
-    .expect("translate")
+    translate_messages_untallied("anthropic", messages, SystemTurnPolicy::Forward)
+        .expect("translate")
 }
 
 /// Forward policy: a system turn between a user and an assistant turn
@@ -147,13 +142,8 @@ fn lift_policy_emits_no_system_turn() {
     ];
 
     // Act
-    let out = translate_messages_untallied(
-        "anthropic",
-        &messages,
-        SystemTurnPolicy::Lift,
-        &mut passthrough_tally(),
-    )
-    .expect("translate");
+    let out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Lift)
+        .expect("translate");
 
     // Assert
     assert_eq!(st_roles(&out), vec!["user", "assistant"]);
@@ -389,6 +379,7 @@ fn whole_turn_drop_is_refused_after_a_system_turn() {
         &req,
         CoreHistoryReasoning::Auto,
         SystemTurnPolicy::Forward,
+        &mut passthrough_tally(),
     )
     .expect("strip");
     let out = st_forward(&normalized);
@@ -448,6 +439,7 @@ fn whole_turn_drop_still_fires_without_a_preceding_system_turn() {
         &req,
         CoreHistoryReasoning::Auto,
         SystemTurnPolicy::Forward,
+        &mut passthrough_tally(),
     )
     .expect("strip");
     let out = st_forward(&normalized);
@@ -496,15 +488,11 @@ fn whole_turn_drop_still_fires_after_a_system_turn_on_the_lift_lane() {
         &req,
         CoreHistoryReasoning::Auto,
         SystemTurnPolicy::Lift,
-    )
-    .expect("strip");
-    let out = translate_messages_untallied(
-        "anthropic",
-        &normalized,
-        SystemTurnPolicy::Lift,
         &mut passthrough_tally(),
     )
-    .expect("translate");
+    .expect("strip");
+    let out = translate_messages_untallied("anthropic", &normalized, SystemTurnPolicy::Lift)
+        .expect("translate");
 
     // Assert
     assert_eq!(
@@ -546,6 +534,7 @@ fn st_strip_then_forward(messages: Vec<Message>) -> (Vec<&'static str>, Vec<Anth
         &req,
         CoreHistoryReasoning::Auto,
         SystemTurnPolicy::Forward,
+        &mut passthrough_tally(),
     )
     .expect("strip");
     let roles = normalized
@@ -779,13 +768,8 @@ fn empty_forwarded_system_turn_after_compaction_is_dropped() {
         let messages = vec![st_user("hi"), st_system(content), st_assistant("ok")];
 
         // Act
-        let out = translate_messages_untallied(
-            "anthropic",
-            &messages,
-            SystemTurnPolicy::Forward,
-            &mut passthrough_tally(),
-        )
-        .unwrap_or_else(|e| panic!("{name}: an empty system turn must not be refused: {e}"));
+        let out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Forward)
+            .unwrap_or_else(|e| panic!("{name}: an empty system turn must not be refused: {e}"));
 
         // Assert
         assert_eq!(st_roles(&out), vec!["user", "assistant"], "{name}");
@@ -906,13 +890,8 @@ fn null_content_system_turn_on_the_lift_path_is_not_an_error() {
     ];
 
     // Act
-    let out = translate_messages_untallied(
-        "anthropic",
-        &messages,
-        SystemTurnPolicy::Lift,
-        &mut passthrough_tally(),
-    )
-    .expect("translate");
+    let out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Lift)
+        .expect("translate");
 
     // Assert
     assert_eq!(st_roles(&out), vec!["user", "assistant"]);

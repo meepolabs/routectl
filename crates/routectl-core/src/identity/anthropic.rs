@@ -377,7 +377,7 @@ pub const fn default_claude_code_anthropic_betas() -> &'static [&'static str] {
 /// every caller that must agree with the egress: the WIRE gate (which
 /// decides whether to stamp the Claude-Code session identity headers), the
 /// ROUTER pure-passthrough gate (which decides whether a forwarded request
-/// may egress at all), the terminal-Anthropic envelope unwrap, and the
+/// may egress at all), the terminal-Anthropic foreign-envelope omission, and the
 /// config/CLI surfaces. Because the answer gates first-party identity
 /// treatment and a wire rewrite, it MUST match the host the request path
 /// actually egresses to.

@@ -1048,6 +1048,22 @@ Surfaces: [openai-compat](#openai-compat-surface) -
     ignored cross-model, so it is never rejected; wrapping it would
     corrupt a mechanism that works today. Never introduce a second local
     notion of "is this Anthropic" beside the shared classifier.
+  - **Egress to the genuine Anthropic host omits the block.** An envelope
+    only ever wraps an artifact another lane minted, and
+    `api.anthropic.com` answers 400 `Invalid data in redacted_thinking
+    block` to a blob it did not issue, so neither the envelope nor its
+    inner blob may ship there. `envelope_policy.rs` in
+    `routectl-providers/src/anthropic_api/` decides it once per request
+    from the base URL: on that host the whole `redacted_thinking` block
+    is omitted (content parts and `reasoning_details` in
+    `normalize_replay_invariants`, which drops a turn the omission
+    empties; cached details in the context-management reinjection), and
+    that turn's hidden reasoning is lost on the lane switch. Every other
+    anthropic-api target (another routectl hop, an Anthropic-compatible
+    third party) and Bedrock Invoke keep the envelope byte for byte, so a
+    later Responses lane can still restore the artifact. A
+    `redacted_thinking` value that is not a recognized envelope ships
+    unchanged everywhere.
 
 - **Reasoning `format` tags are a family, and comparing one with `==`
   silently drops details.** `ReasoningDetail.format` serializes outward to

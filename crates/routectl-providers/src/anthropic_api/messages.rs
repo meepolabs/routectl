@@ -24,7 +24,7 @@
 //! Diagnostics for the whole egress attempt are aggregated, never
 //! per-item: `ReasoningSkipTally` pools the reasoning-skip categories,
 //! `SystemTurnTally` pools the forwarded-system-turn counts, and
-//! `EnvelopeUnwrapTally` (owned upstream in `request::normalize`, since
+//! `ForeignEnvelopeTally` (owned upstream in `request::normalize`, since
 //! cache reinjection also builds `redacted_thinking` blocks) pools the
 //! envelope events, so one request defect costs one line rather than one
 //! per turn. The reasoning-skip tally emits at WARN; the system-turn and
@@ -47,7 +47,7 @@ use crate::bounded_diagnostics::BoundedLogSample;
 use crate::skipped_format::render_skipped_format;
 
 use super::carriers::Carriers;
-use super::envelope_policy::EnvelopeUnwrapTally;
+use super::envelope_policy::ForeignEnvelopeTally;
 #[cfg(test)]
 use super::envelope_policy::passthrough_tally;
 use super::parts::{parse_file_document_source, parse_image_url_source, strip_text_after_tool_use};
@@ -131,6 +131,7 @@ pub(super) fn normalize_replay_invariants<'a>(
     req: &'a ChatRequest,
     history_reasoning: CoreHistoryReasoning,
     system_turns: SystemTurnPolicy,
+    envelopes: &mut ForeignEnvelopeTally,
 ) -> Result<Cow<'a, [Message]>> {
     // Tool-result tool_call_id check stays a hard fail REGARDLESS of
     // history_reasoning -- it is a separate correctness invariant, not
@@ -149,34 +150,33 @@ pub(super) fn normalize_replay_invariants<'a>(
         }
     }
 
-    // Preserve: skip the unsigned-thinking strip and pass the messages
-    // through unchanged. deepseek v4's `/anthropic` endpoint emits
-    // unsigned thinking AND 400s the next turn unless it is echoed back
-    // verbatim, so stripping would break every multi-turn replay. The
-    // tool_call_id check above is validation-only (no mutation), so
-    // Preserve can borrow; nothing is stripped, so no message-emptying
-    // and no WARN.
-    match history_reasoning {
-        CoreHistoryReasoning::Preserve => {
-            return Ok(Cow::Borrowed(&req.messages));
-        }
-        CoreHistoryReasoning::Auto | CoreHistoryReasoning::Strip => {}
-    }
+    // Preserve skips the unsigned-thinking strip: deepseek v4's
+    // `/anthropic` endpoint emits unsigned thinking AND 400s the next turn
+    // unless it is echoed back verbatim, so stripping would break every
+    // multi-turn replay. A foreign reasoning envelope is omitted under
+    // every policy: no target that omits it can accept it.
+    let strip_unsigned = match history_reasoning {
+        CoreHistoryReasoning::Preserve => false,
+        CoreHistoryReasoning::Auto | CoreHistoryReasoning::Strip => true,
+    };
 
-    // Strip / Auto pre-scan: do we need to strip anything? No -> return
-    // Borrowed (no clone). Yes -> rebuild on the second pass.
+    // Pre-scan: is there anything to remove? No -> return Borrowed (no
+    // clone). Yes -> rebuild on the second pass.
     // SEED-VERDICT: acceptance-seed -- Anthropic accepts the stripped history,
     // so no rejection could retire the strip, and it rewrites replayed turns:
     // prefix-changing, retirable only by a canary showing the unstripped
     // history accepted, and no canary samples this site yet.
-    let needs_strip = req.messages.iter().any(message_has_unsigned_thinking);
-    if !needs_strip {
+    let needs_rebuild = req.messages.iter().any(|m| {
+        (strip_unsigned && message_has_unsigned_thinking(m))
+            || message_has_omitted_envelope(m, envelopes)
+    });
+    if !needs_rebuild {
         return Ok(Cow::Borrowed(&req.messages));
     }
 
-    // Rebuild path: walk every message; for Parts, retain non-unsigned-
-    // thinking blocks. Drop the message wholesale when stripping leaves
-    // nothing the wire can serialize.
+    // Rebuild path: walk every message, removing what the target cannot
+    // accept. Drop the message wholesale when removal leaves nothing the
+    // wire can serialize.
     let mut out: Vec<Message> = Vec::with_capacity(req.messages.len());
     let mut dropped_blocks: usize = 0;
     // The samples bound what reaches the log record; the counters beside
@@ -188,66 +188,47 @@ pub(super) fn normalize_replay_invariants<'a>(
     let mut dropped_turn_indices: BoundedLogSample<usize> = BoundedLogSample::new();
     let tap = super::wire_edits::tap_of(req);
     for (i, msg) in req.messages.iter().enumerate() {
-        let MessageContent::Parts(parts) = &msg.content else {
-            // Text / Null content cannot carry a Thinking block.
-            out.push(msg.clone());
-            continue;
-        };
-        let original_len = parts.len();
-        let kept: Vec<ContentPart> = parts
-            .iter()
-            .filter(|p| !is_unsigned_thinking_part(p))
-            .cloned()
-            .collect();
-        let stripped_here = original_len.saturating_sub(kept.len());
-        super::wire_edits::declare_unsigned_thinking_strip(
-            tap,
-            i,
-            parts,
-            is_unsigned_thinking_part,
-        );
-        if stripped_here > 0 {
-            dropped_blocks += stripped_here;
+        let rebuilt = rebuild_message(i, msg, strip_unsigned, envelopes, tap);
+        if rebuilt.unsigned_stripped > 0 {
+            dropped_blocks += rebuilt.unsigned_stripped;
             affected_message_count += 1;
             affected_messages.push(i);
         }
         let has_tool_calls = msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
-        let has_emittable_reasoning = message_has_emittable_reasoning(msg);
-        if kept.is_empty()
+        let has_emittable_reasoning = message_has_emittable_reasoning(&rebuilt.message);
+        let droppable = rebuilt.content_empty
             && !has_tool_calls
             && !has_emittable_reasoning
-            && !follows_wire_system_turn(&out, system_turns)
-        {
-            // Stripping emptied this message and there is no other content
-            // the wire can serialize: no tool_calls, and every
-            // reasoning_detail is non-emittable (unsigned or foreign
-            // format, so `emit_reasoning_blocks` would skip them all).
-            // Anthropic's wire spec rejects content: [] for both roles;
-            // keeping the message here would just trade the strip 400 for
-            // an empty-array 400 in `build_assistant_content`. A message
-            // with tool_calls is NEVER dropped -- that would orphan the
-            // next tool_result turn.
+            && !follows_wire_system_turn(&out, system_turns);
+        // Removal emptied this message and there is no other content the
+        // wire can serialize: no tool_calls, and every reasoning_detail is
+        // non-emittable. Anthropic's wire spec rejects content: [] for
+        // both roles. A message with tool_calls is NEVER dropped -- that
+        // would orphan the next tool_result turn -- and neither is a tool
+        // turn emptied by an omitted envelope, which still answers its
+        // tool_use and ships an empty result instead.
+        let drop = if rebuilt.envelopes_omitted {
+            droppable && !matches!(msg.role, Role::Tool)
+        } else {
+            matches!(msg.content, MessageContent::Parts(_)) && droppable
+        };
+        if drop {
             dropped_turn_count += 1;
             dropped_turn_indices.push(i);
+            let site = if rebuilt.unsigned_stripped > 0 {
+                routectl_core::wire_check::EditSite::SignatureStrip
+            } else {
+                routectl_core::wire_check::EditSite::HistoryReasoningStrip
+            };
             super::wire_edits::declare(
                 tap,
-                routectl_core::wire_check::EditSite::SignatureStrip,
+                site,
                 format!("/messages/{i}"),
                 routectl_core::wire_check::EditKind::Remove,
             );
             continue;
         }
-        out.push(Message {
-            refusal: None,
-            role: msg.role.clone(),
-            content: MessageContent::Parts(kept),
-            reasoning: msg.reasoning.clone(),
-            reasoning_details: msg.reasoning_details.clone(),
-            name: msg.name.clone(),
-            tool_call_id: msg.tool_call_id.clone(),
-            tool_calls: msg.tool_calls.clone(),
-            extras: msg.extras.clone(),
-        });
+        out.push(rebuilt.message);
     }
 
     // One structured DEBUG event per request: the strip is an expected
@@ -255,21 +236,23 @@ pub(super) fn normalize_replay_invariants<'a>(
     // log line (could be reasoning over sensitive data); only counts
     // and indices reach the operator. Provider id is always present
     // so an operator triaging a noisy upstream can grep by it.
-    tracing::debug!(
-        provider = id,
-        dropped_blocks,
-        affected_messages_count = affected_message_count,
-        affected_messages = ?affected_messages.items(),
-        affected_messages_truncated = affected_messages.truncated(),
-        "stripping unsigned thinking blocks from outgoing request: \
-         Anthropic requires a signature on replayed Thinking blocks. \
-         Cross-provider fallback or SDKs that fail to round-trip the \
-         signature field would otherwise 400 the request. Routectl \
-         drops just the unsigned blocks; signed thinking blocks and \
-         other content pass through unchanged."
-    );
+    if dropped_blocks > 0 {
+        tracing::debug!(
+            provider = id,
+            dropped_blocks,
+            affected_messages_count = affected_message_count,
+            affected_messages = ?affected_messages.items(),
+            affected_messages_truncated = affected_messages.truncated(),
+            "stripping unsigned thinking blocks from outgoing request: \
+             Anthropic requires a signature on replayed Thinking blocks. \
+             Cross-provider fallback or SDKs that fail to round-trip the \
+             signature field would otherwise 400 the request. Routectl \
+             drops just the unsigned blocks; signed thinking blocks and \
+             other content pass through unchanged."
+        );
+    }
 
-    // Separate aggregated DEBUG line when stripping emptied a whole assistant
+    // Separate aggregated DEBUG line when removal emptied a whole assistant
     // turn (the per-block strip event above only covers individual dropped
     // blocks). Distinct field/message so operators can tell "some blocks
     // stripped" from "an entire turn omitted". No content is logged.
@@ -288,6 +271,136 @@ pub(super) fn normalize_replay_invariants<'a>(
     }
 
     Ok(Cow::Owned(out))
+}
+
+/// One message after the replay-invariant removals, with what was removed.
+struct RebuiltMessage {
+    message: Message,
+    unsigned_stripped: usize,
+    envelopes_omitted: bool,
+    /// The content left nothing to serialize: an empty `Parts`, `Null`, or
+    /// empty text.
+    content_empty: bool,
+}
+
+/// Remove from `msg` the unsigned thinking blocks (when `strip_unsigned`)
+/// and every `redacted_thinking` block or `Encrypted` reasoning detail
+/// whose data the target omits, declaring each removed content block at
+/// its client index.
+fn rebuild_message(
+    index: usize,
+    msg: &Message,
+    strip_unsigned: bool,
+    envelopes: &mut ForeignEnvelopeTally,
+    tap: Option<&routectl_core::wire_check::WireTap>,
+) -> RebuiltMessage {
+    let mut unsigned_stripped = 0usize;
+    let mut omitted = 0usize;
+    let content = match &msg.content {
+        MessageContent::Parts(parts) => {
+            if strip_unsigned {
+                super::wire_edits::declare_unsigned_thinking_strip(
+                    tap,
+                    index,
+                    parts,
+                    is_unsigned_thinking_part,
+                );
+            }
+            let mut kept: Vec<ContentPart> = Vec::with_capacity(parts.len());
+            for (block, part) in parts.iter().enumerate() {
+                if strip_unsigned && is_unsigned_thinking_part(part) {
+                    unsigned_stripped += 1;
+                } else if omits_envelope_part(part, envelopes) {
+                    omitted += 1;
+                    super::wire_edits::declare(
+                        tap,
+                        routectl_core::wire_check::EditSite::HistoryReasoningStrip,
+                        format!("/messages/{index}/content/{block}"),
+                        routectl_core::wire_check::EditKind::Remove,
+                    );
+                } else {
+                    kept.push(part.clone());
+                }
+            }
+            MessageContent::Parts(kept)
+        }
+        other => other.clone(),
+    };
+    let details_before = msg.reasoning_details.len();
+    let reasoning_details: Vec<ReasoningDetail> = msg
+        .reasoning_details
+        .iter()
+        .filter(|d| !omits_envelope_detail(d, envelopes))
+        .cloned()
+        .collect();
+    omitted += details_before - reasoning_details.len();
+    let content_empty = match &content {
+        MessageContent::Parts(kept) => kept.is_empty(),
+        MessageContent::Text(t) => t.is_empty(),
+        MessageContent::Null => true,
+    };
+    RebuiltMessage {
+        message: Message {
+            refusal: None,
+            role: msg.role.clone(),
+            content,
+            reasoning: msg.reasoning.clone(),
+            reasoning_details,
+            name: msg.name.clone(),
+            tool_call_id: msg.tool_call_id.clone(),
+            tool_calls: msg.tool_calls.clone(),
+            extras: msg.extras.clone(),
+        },
+        unsigned_stripped,
+        envelopes_omitted: omitted > 0,
+        content_empty,
+    }
+}
+
+/// The `data` of a typed `redacted_thinking` content part.
+fn redacted_part_data(p: &ContentPart) -> Option<&str> {
+    match p {
+        ContentPart::Known(KnownContentPart::RedactedThinking { data, .. }) => Some(data),
+        _ => None,
+    }
+}
+
+/// The `data` an `Encrypted` detail would ship as a `redacted_thinking`
+/// block through `emit_reasoning_blocks`; `None` for any detail that
+/// never ships as one.
+fn redacted_detail_data(d: &ReasoningDetail) -> Option<&str> {
+    if !matches!(d.kind, ReasoningDetailKind::Encrypted) || !is_anthropic_emittable_detail(d) {
+        return None;
+    }
+    d.payload.get("data").and_then(|v| v.as_str())
+}
+
+/// Whether `p` is omitted on this target, counting it when it is.
+fn omits_envelope_part(p: &ContentPart, envelopes: &mut ForeignEnvelopeTally) -> bool {
+    redacted_part_data(p).is_some_and(|data| envelopes.omit(data))
+}
+
+/// Whether `d` is omitted on this target, counting it when it is.
+fn omits_envelope_detail(d: &ReasoningDetail, envelopes: &mut ForeignEnvelopeTally) -> bool {
+    redacted_detail_data(d).is_some_and(|data| envelopes.omit(data))
+}
+
+/// True iff `msg` carries a content part or reasoning detail this target
+/// omits. Counts nothing: the rebuild pass is the single counter.
+fn message_has_omitted_envelope(msg: &Message, envelopes: &ForeignEnvelopeTally) -> bool {
+    let in_parts = match &msg.content {
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .filter_map(redacted_part_data)
+            .any(|data| envelopes.omits(data)),
+        MessageContent::Text(_) | MessageContent::Null => false,
+    };
+    in_parts
+        || msg
+            .reasoning_details
+            .iter()
+            .filter_map(redacted_detail_data)
+            .any(|data| envelopes.omits(data))
 }
 
 /// True iff `p` is a `Thinking` block whose `signature` cannot ride a
@@ -418,13 +531,9 @@ fn message_has_emittable_reasoning(msg: &Message) -> bool {
         .any(is_anthropic_emittable_detail)
 }
 
-fn translate_content_part(
-    p: &ContentPart,
-    envelopes: &mut EnvelopeUnwrapTally,
-    carriers: Carriers,
-) -> ContentBlock {
+fn translate_content_part(p: &ContentPart, carriers: Carriers) -> ContentBlock {
     match p {
-        ContentPart::Known(k) => translate_known_part(k, envelopes, carriers),
+        ContentPart::Known(k) => translate_known_part(k, carriers),
         ContentPart::Other {
             type_tag,
             cache_control,
@@ -437,11 +546,7 @@ fn translate_content_part(
     }
 }
 
-fn translate_known_part(
-    k: &KnownContentPart,
-    envelopes: &mut EnvelopeUnwrapTally,
-    carriers: Carriers,
-) -> ContentBlock {
+fn translate_known_part(k: &KnownContentPart, carriers: Carriers) -> ContentBlock {
     let extras = carriers.part(k);
     match k {
         KnownContentPart::Text {
@@ -599,7 +704,7 @@ fn translate_known_part(
             extras,
         },
         KnownContentPart::RedactedThinking { data, .. } => ContentBlock::RedactedThinking {
-            data: envelopes.wire_data(data),
+            data: data.clone(),
             cache_control: None,
             extras,
         },
@@ -741,7 +846,6 @@ fn build_assistant_content(
     id: &str,
     message_index: usize,
     msg: &Message,
-    envelopes: &mut EnvelopeUnwrapTally,
     carriers: Carriers,
     skips: &mut ReasoningSkipTally<'_>,
 ) -> Result<AnthropicContent> {
@@ -751,14 +855,12 @@ fn build_assistant_content(
         // tool_calls field to re-emit; fall through to the generic
         // content translation (Text or Parts), but strip trailing
         // text-after-tool_use first (see helper docstring).
-        let content = translate_assistant_simple_content(&msg.content, envelopes, carriers);
+        let content = translate_assistant_simple_content(&msg.content, carriers);
         return Ok(backstop_empty_blocks(content, skips));
     }
 
-    let mut blocks =
-        emit_reasoning_blocks(message_index, &msg.reasoning_details, envelopes, skips)?;
-    let emitted_tool_ids =
-        append_assistant_message_blocks(&mut blocks, &msg.content, envelopes, carriers);
+    let mut blocks = emit_reasoning_blocks(message_index, &msg.reasoning_details, skips)?;
+    let emitted_tool_ids = append_assistant_message_blocks(&mut blocks, &msg.content, carriers);
     if let Some(tool_calls) = msg.tool_calls.as_ref() {
         emit_tool_use_blocks_from_calls(id, tool_calls, &mut blocks, &emitted_tool_ids)?;
     }
@@ -895,10 +997,10 @@ fn emit_tool_use_blocks_from_calls(
 /// The `format` tag on a `ReasoningDetail` is CLIENT-SUPPLIED on the
 /// request schema, so a caller can tag any payload `anthropic-claude-v1`
 /// and reach the `RedactedThinking` arm below with arbitrary `data`,
-/// wrapped envelope included. `envelopes` therefore applies to this
-/// channel exactly as it does to the content-part walk;
-/// `is_anthropic_emittable_detail` decides emittability only and is not a
-/// barrier here.
+/// wrapped envelope included. `normalize_replay_invariants` therefore
+/// removes such a detail before this runs on a target that omits it, as it
+/// does for a content part; `is_anthropic_emittable_detail` decides
+/// emittability only and is not a barrier here.
 ///
 /// Skips are recorded into `skips` rather than logged here: the WARNs are
 /// aggregated across every assistant turn of one outbound attempt and
@@ -907,7 +1009,6 @@ fn emit_tool_use_blocks_from_calls(
 fn emit_reasoning_blocks(
     message_index: usize,
     details: &[ReasoningDetail],
-    envelopes: &mut EnvelopeUnwrapTally,
     skips: &mut ReasoningSkipTally<'_>,
 ) -> Result<Vec<ContentBlock>> {
     let mut sorted = details.to_vec();
@@ -967,7 +1068,7 @@ fn emit_reasoning_blocks(
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 blocks.push(ContentBlock::RedactedThinking {
-                    data: envelopes.wire_data(data),
+                    data: data.to_string(),
                     cache_control: None,
                     extras: serde_json::Map::new(),
                 });
@@ -1000,7 +1101,6 @@ fn emit_reasoning_blocks(
 fn append_assistant_message_blocks(
     blocks: &mut Vec<ContentBlock>,
     content: &MessageContent,
-    envelopes: &mut EnvelopeUnwrapTally,
     carriers: Carriers,
 ) -> HashSet<String> {
     let mut emitted_tool_ids: HashSet<String> = HashSet::new();
@@ -1015,7 +1115,7 @@ fn append_assistant_message_blocks(
         MessageContent::Parts(parts) => {
             let cleaned = strip_text_after_tool_use(parts);
             for p in &cleaned {
-                let (block, tool_id) = translate_assistant_content_part(p, envelopes, carriers);
+                let (block, tool_id) = translate_assistant_content_part(p, carriers);
                 if let Some(tool_id) = tool_id {
                     emitted_tool_ids.insert(tool_id);
                 }
@@ -1039,10 +1139,9 @@ fn append_assistant_message_blocks(
 /// `translate_content_part`.
 fn translate_assistant_content_part(
     p: &ContentPart,
-    envelopes: &mut EnvelopeUnwrapTally,
     carriers: Carriers,
 ) -> (ContentBlock, Option<String>) {
-    let block = translate_content_part(p, envelopes, carriers);
+    let block = translate_content_part(p, carriers);
     match p {
         ContentPart::Known(KnownContentPart::ToolUse { id, .. }) => (block, Some(id.clone())),
         _ => (block, None),
@@ -1054,42 +1153,34 @@ fn translate_assistant_content_part(
 /// only from `build_assistant_content`. Text/Null arms delegate to
 /// `translate_simple_content` so the two stay in lockstep -- only the
 /// `Parts` arm needs the strip.
-fn translate_assistant_simple_content(
-    c: &MessageContent,
-    envelopes: &mut EnvelopeUnwrapTally,
-    carriers: Carriers,
-) -> AnthropicContent {
+fn translate_assistant_simple_content(c: &MessageContent, carriers: Carriers) -> AnthropicContent {
     match c {
         MessageContent::Parts(parts) => {
             let cleaned = strip_text_after_tool_use(parts);
             AnthropicContent::Blocks(
                 cleaned
                     .iter()
-                    .map(|p| translate_assistant_content_part(p, envelopes, carriers).0)
+                    .map(|p| translate_assistant_content_part(p, carriers).0)
                     .collect(),
             )
         }
         // Text/Null arms are identical to `translate_simple_content`;
         // delegate to keep them in one place.
-        _ => translate_simple_content(c, envelopes, carriers),
+        _ => translate_simple_content(c, carriers),
     }
 }
 
 /// Translate plain message content (no multi-turn reasoning context).
 /// Text -> AnthropicContent::Text (cheaper wire form). Parts ->
 /// AnthropicContent::Blocks via per-part translation.
-fn translate_simple_content(
-    c: &MessageContent,
-    envelopes: &mut EnvelopeUnwrapTally,
-    carriers: Carriers,
-) -> AnthropicContent {
+fn translate_simple_content(c: &MessageContent, carriers: Carriers) -> AnthropicContent {
     match c {
         MessageContent::Text(t) => AnthropicContent::Text(t.clone()),
         MessageContent::Null => AnthropicContent::Text(String::new()),
         MessageContent::Parts(parts) => AnthropicContent::Blocks(
             parts
                 .iter()
-                .map(|p| translate_content_part(p, envelopes, carriers))
+                .map(|p| translate_content_part(p, carriers))
                 .collect(),
         ),
     }
@@ -1113,7 +1204,6 @@ fn translate_simple_content(
 fn build_tool_message(
     run: &[&Message],
     first: usize,
-    envelopes: &mut EnvelopeUnwrapTally,
     carriers: Carriers,
 ) -> (AnthropicMessage, Vec<(usize, String)>) {
     let (extras, replaced) = carriers.joined_messages(run, first);
@@ -1122,7 +1212,7 @@ fn build_tool_message(
         content: AnthropicContent::Blocks(
             run.iter()
                 .copied()
-                .map(|m| build_tool_result_block(m, envelopes, carriers))
+                .map(|m| build_tool_result_block(m, carriers))
                 .collect(),
         ),
         extras,
@@ -1130,11 +1220,7 @@ fn build_tool_message(
     (message, replaced)
 }
 
-fn build_tool_result_block(
-    msg: &Message,
-    envelopes: &mut EnvelopeUnwrapTally,
-    carriers: Carriers,
-) -> ContentBlock {
+fn build_tool_result_block(msg: &Message, carriers: Carriers) -> ContentBlock {
     // Sanitize to the same charset the tool_use emit uses so a result
     // for an OpenAI-origin id (`call.foo:1`) still correlates with its
     // tool_use block after both are mapped to the same wire id.
@@ -1149,8 +1235,7 @@ fn build_tool_result_block(
             parts
                 .iter()
                 .map(|p| {
-                    serde_json::to_value(translate_content_part(p, envelopes, carriers))
-                        .unwrap_or(Value::Null)
+                    serde_json::to_value(translate_content_part(p, carriers)).unwrap_or(Value::Null)
                 })
                 .collect(),
         ),
@@ -1200,13 +1285,6 @@ fn ensure_min_tool_result_content(content: Value) -> Value {
 /// tool results separated by an assistant or system turn stay in separate
 /// messages and nothing is reordered across the boundary.
 ///
-/// `envelopes` carries the already-resolved reasoning-envelope policy for
-/// this request -- see [`EnvelopeUnwrapTally`]. It is owned by
-/// `request::normalize` rather than by this function because the
-/// context-management reinjection path constructs `redacted_thinking`
-/// blocks too, after this returns, and both channels must share one tally
-/// so the aggregated DEBUG event stays at one line per request.
-///
 /// The reasoning-skip and system-turn tallies, by contrast, are owned
 /// HERE: this walk is their only feeder, so a wider owner would spread
 /// the flush over call sites that never fill it. Every fallible step lives
@@ -1223,7 +1301,6 @@ pub(super) fn translate_messages(
     id: &str,
     messages: &[Message],
     policy: SystemTurnPolicy,
-    envelopes: &mut EnvelopeUnwrapTally,
     fingerprint: &mut super::request::ClientFingerprintStripTally,
     tap: Option<&routectl_core::wire_check::WireTap>,
     carriers: Carriers,
@@ -1235,7 +1312,6 @@ pub(super) fn translate_messages(
         messages,
         WireMessages::for_tap(messages.len(), tap, carriers),
         policy,
-        envelopes,
         &mut skips,
         &mut system_turns,
     );
@@ -1331,18 +1407,9 @@ pub(super) fn translate_messages_untallied(
     id: &str,
     messages: &[Message],
     policy: SystemTurnPolicy,
-    envelopes: &mut EnvelopeUnwrapTally,
 ) -> Result<Vec<AnthropicMessage>> {
     let mut fingerprint = super::request::ClientFingerprintStripTally::default();
-    translate_messages(
-        id,
-        messages,
-        policy,
-        envelopes,
-        &mut fingerprint,
-        None,
-        Carriers::Emit,
-    )
+    translate_messages(id, messages, policy, &mut fingerprint, None, Carriers::Emit)
 }
 
 /// Whether a canonical `Role::System` turn reaches the wire as a
@@ -1527,7 +1594,6 @@ fn translate_messages_threaded(
     messages: &[Message],
     mut wire: WireMessages,
     policy: SystemTurnPolicy,
-    envelopes: &mut EnvelopeUnwrapTally,
     skips: &mut ReasoningSkipTally<'_>,
     system_turns: &mut SystemTurnTally<'_>,
 ) -> Result<(WireMessages, MessageLedger)> {
@@ -1546,14 +1612,7 @@ fn translate_messages_threaded(
                         ledger.system_turns_consumed_by_lift += 1;
                     }
                     SystemTurnPolicy::Forward => {
-                        emit_forwarded_system_turn(
-                            i,
-                            msg,
-                            &mut wire,
-                            &mut ledger,
-                            system_turns,
-                            envelopes,
-                        );
+                        emit_forwarded_system_turn(i, msg, &mut wire, &mut ledger, system_turns);
                     }
                 }
                 i += 1;
@@ -1563,7 +1622,7 @@ fn translate_messages_threaded(
                     i,
                     AnthropicMessage {
                         role: AnthropicRole::User,
-                        content: translate_simple_content(&msg.content, envelopes, carriers),
+                        content: translate_simple_content(&msg.content, carriers),
                         extras: carriers.message(msg),
                     },
                     &mut ledger,
@@ -1575,7 +1634,7 @@ fn translate_messages_threaded(
                     i,
                     AnthropicMessage {
                         role: AnthropicRole::Assistant,
-                        content: build_assistant_content(id, i, msg, envelopes, carriers, skips)?,
+                        content: build_assistant_content(id, i, msg, carriers, skips)?,
                         extras: carriers.message(msg),
                     },
                     &mut ledger,
@@ -1586,7 +1645,7 @@ fn translate_messages_threaded(
                 let (run, run_end) = collect_tool_run(messages, i);
                 ledger.tool_turns_consumed += run.len();
                 ledger.tool_runs_emitted += 1;
-                let (joined, replaced) = build_tool_message(&run, i, envelopes, carriers);
+                let (joined, replaced) = build_tool_message(&run, i, carriers);
                 wire.joined_member_rewrites.extend(replaced);
                 wire.push(i, joined, &mut ledger);
                 i = run_end;
@@ -1605,7 +1664,7 @@ fn translate_messages_threaded(
                     role = %sanitize_for_log(tag),
                     "anthropic egress: unrecognized message role forwarded as user"
                 );
-                emit_other_role_turn(i, msg, &mut wire, &mut ledger, system_turns, envelopes);
+                emit_other_role_turn(i, msg, &mut wire, &mut ledger, system_turns);
                 i += 1;
             }
         }
@@ -1886,7 +1945,6 @@ fn emit_forwarded_system_turn(
     wire: &mut WireMessages,
     ledger: &mut MessageLedger,
     system_turns: &mut SystemTurnTally<'_>,
-    envelopes: &mut EnvelopeUnwrapTally,
 ) {
     let content = &msg.content;
     let screened = screen_forwarded_system_content(content);
@@ -1897,7 +1955,7 @@ fn emit_forwarded_system_turn(
                 index,
                 AnthropicMessage {
                     role: AnthropicRole::System,
-                    content: translate_simple_content(&kept, envelopes, wire.carriers),
+                    content: translate_simple_content(&kept, wire.carriers),
                     extras: wire.carriers.message(msg),
                 },
                 ledger,
@@ -1937,17 +1995,15 @@ fn emit_other_role_turn(
     wire: &mut WireMessages,
     ledger: &mut MessageLedger,
     system_turns: &mut SystemTurnTally<'_>,
-    envelopes: &mut EnvelopeUnwrapTally,
 ) {
     let carriers = wire.carriers;
-    let user_turn =
-        |content: &MessageContent, envelopes: &mut EnvelopeUnwrapTally| AnthropicMessage {
-            role: AnthropicRole::User,
-            content: translate_simple_content(content, envelopes, carriers),
-            extras: carriers.message(msg),
-        };
+    let user_turn = |content: &MessageContent| AnthropicMessage {
+        role: AnthropicRole::User,
+        content: translate_simple_content(content, carriers),
+        extras: carriers.message(msg),
+    };
     if !crate::system_filter::system_message_carries_billing_block(msg) {
-        wire.push(index, user_turn(&msg.content, envelopes), ledger);
+        wire.push(index, user_turn(&msg.content), ledger);
         return;
     }
     let parts_before = match &msg.content {
@@ -1960,7 +2016,7 @@ fn emit_other_role_turn(
             MessageContent::Text(_) | MessageContent::Null => 1,
         };
         system_turns.record_billing_stripped(parts_before.saturating_sub(parts_after));
-        wire.push(index, user_turn(&kept.content, envelopes), ledger);
+        wire.push(index, user_turn(&kept.content), ledger);
         return;
     }
     system_turns.record_billing_stripped(parts_before);
@@ -2124,7 +2180,7 @@ fn collect_tool_run(messages: &[Message], start: usize) -> (Vec<&Message>, usize
 #[cfg(test)]
 mod translate_file_part_tests {
     use super::ContentBlock;
-    use super::{Carriers, passthrough_tally, translate_content_part};
+    use super::{Carriers, translate_content_part};
     use routectl_core::{ContentPart, KnownContentPart};
     use serde_json::json;
 
@@ -2142,7 +2198,7 @@ mod translate_file_part_tests {
             "filename": "draft.pdf",
             "file_data": "data:application/pdf;base64,JVBERi0xLjQ="
         }));
-        match translate_content_part(&part, &mut passthrough_tally(), Carriers::Emit) {
+        match translate_content_part(&part, Carriers::Emit) {
             ContentBlock::Document {
                 source,
                 title,
@@ -2165,7 +2221,7 @@ mod translate_file_part_tests {
         // Anthropic upstream surfaces a clean error rather than a silent
         // drop. The original nested `file` object is preserved.
         let part = file_part(json!({"file_id": "file-abc"}));
-        match translate_content_part(&part, &mut passthrough_tally(), Carriers::Emit) {
+        match translate_content_part(&part, Carriers::Emit) {
             ContentBlock::Other {
                 type_tag, extras, ..
             } => {
@@ -2182,7 +2238,7 @@ mod translate_file_part_tests {
             "filename": "note.txt",
             "file_data": "data:text/plain;base64,aGVsbG8="
         }));
-        match translate_content_part(&part, &mut passthrough_tally(), Carriers::Emit) {
+        match translate_content_part(&part, Carriers::Emit) {
             ContentBlock::Other { type_tag, .. } => assert_eq!(type_tag, "file"),
             other => panic!("expected Other passthrough, got {other:?}"),
         }
@@ -2194,7 +2250,7 @@ mod translate_file_part_tests {
             "filename": "draft.pdf",
             "file_data": "data:application/pdf;base64,"
         }));
-        match translate_content_part(&part, &mut passthrough_tally(), Carriers::Emit) {
+        match translate_content_part(&part, Carriers::Emit) {
             ContentBlock::Other { type_tag, .. } => assert_eq!(type_tag, "file"),
             other => panic!("expected Other passthrough, got {other:?}"),
         }
@@ -2211,7 +2267,7 @@ mod translate_file_part_tests {
             cache_control: Some(CacheControl::ephemeral_5m()),
             extras: serde_json::Map::new(),
         });
-        match translate_content_part(&part, &mut passthrough_tally(), Carriers::Emit) {
+        match translate_content_part(&part, Carriers::Emit) {
             ContentBlock::Document { cache_control, .. } => {
                 assert!(cache_control.is_some());
             }
@@ -2263,12 +2319,8 @@ mod translate_file_part_tests {
             .find(|p| matches!(p, ContentPart::Known(KnownContentPart::Text { .. })))
             .expect("text part present");
 
-        let wire = serde_json::to_value(translate_content_part(
-            text_part,
-            &mut passthrough_tally(),
-            Carriers::Emit,
-        ))
-        .expect("serialize");
+        let wire = serde_json::to_value(translate_content_part(text_part, Carriers::Emit))
+            .expect("serialize");
 
         assert_eq!(wire["type"], "text");
         assert_eq!(wire["text"], "The sky is blue.");
@@ -2283,7 +2335,7 @@ mod translate_file_part_tests {
 mod thinking_signature_tests {
     use super::{
         B64_STANDARD, SystemTurnPolicy, is_claude_shaped_signature, is_unsigned_thinking_part,
-        normalize_replay_invariants,
+        normalize_replay_invariants, passthrough_tally,
     };
     use base64::Engine;
     use routectl_core::{
@@ -2429,6 +2481,7 @@ mod thinking_signature_tests {
             &req,
             CoreHistoryReasoning::Auto,
             SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
         )
         .expect("strip should not error");
 
@@ -2484,6 +2537,7 @@ mod thinking_signature_tests {
             &req,
             CoreHistoryReasoning::Auto,
             SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
         )
         .expect("strip should not error");
 
@@ -2521,6 +2575,7 @@ mod thinking_signature_tests {
             &req,
             CoreHistoryReasoning::Auto,
             SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
         )
         .expect("strip should not error");
 
@@ -2538,7 +2593,7 @@ mod thinking_signature_tests {
 
 #[cfg(test)]
 mod tool_id_correlation_tests {
-    use super::{ContentBlock, SystemTurnPolicy, passthrough_tally, translate_messages_untallied};
+    use super::{ContentBlock, SystemTurnPolicy, translate_messages_untallied};
     use crate::anthropic_api::types::{AnthropicContent, AnthropicMessage};
     use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role};
     use serde_json::json;
@@ -2626,13 +2681,8 @@ mod tool_id_correlation_tests {
         ];
 
         // Act
-        let out = translate_messages_untallied(
-            "anthropic",
-            &messages,
-            SystemTurnPolicy::Lift,
-            &mut passthrough_tally(),
-        )
-        .expect("translation must not error");
+        let out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Lift)
+            .expect("translation must not error");
 
         // Assert
         assert_eq!(tool_use_id(&out), "esc_call_2efoo_3a1");
@@ -2652,13 +2702,8 @@ mod tool_id_correlation_tests {
         ];
 
         // Act
-        let out = translate_messages_untallied(
-            "anthropic",
-            &messages,
-            SystemTurnPolicy::Lift,
-            &mut passthrough_tally(),
-        )
-        .expect("translation must not error");
+        let out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Lift)
+            .expect("translation must not error");
 
         // Assert
         assert_eq!(tool_use_id(&out), "call_abc-1_2");
@@ -2684,13 +2729,8 @@ mod tool_id_correlation_tests {
         let messages = vec![user_msg(), assistant];
 
         // Act
-        let out = translate_messages_untallied(
-            "anthropic",
-            &messages,
-            SystemTurnPolicy::Lift,
-            &mut passthrough_tally(),
-        )
-        .expect("translation must not error");
+        let out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Lift)
+            .expect("translation must not error");
 
         // Assert
         let ids = tool_use_ids(&out);
@@ -2721,13 +2761,8 @@ mod tool_id_correlation_tests {
         ];
 
         // Act
-        let out = translate_messages_untallied(
-            "anthropic",
-            &messages,
-            SystemTurnPolicy::Lift,
-            &mut passthrough_tally(),
-        )
-        .expect("translation must not error");
+        let out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Lift)
+            .expect("translation must not error");
 
         // Assert -- the two result ids are distinct and are exactly the
         // two emitted tool_use ids, so neither result is orphaned nor
@@ -2757,13 +2792,8 @@ mod tool_id_correlation_tests {
         ];
 
         // Act
-        let out = translate_messages_untallied(
-            "anthropic",
-            &messages,
-            SystemTurnPolicy::Lift,
-            &mut passthrough_tally(),
-        )
-        .expect("translation must not error");
+        let out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Lift)
+            .expect("translation must not error");
 
         // Assert
         let expected = format!("esct_{}_8087e9a889f8a14c", "a".repeat(42));
@@ -2819,13 +2849,8 @@ mod tool_id_correlation_tests {
             let messages = content_part_exchange(raw, raw);
 
             // Act
-            let out = translate_messages_untallied(
-                "anthropic",
-                &messages,
-                SystemTurnPolicy::Lift,
-                &mut passthrough_tally(),
-            )
-            .expect("translation must not error");
+            let out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Lift)
+                .expect("translation must not error");
 
             // Assert
             assert_eq!(tool_use_id(&out), wire, "{name}: tool_use");
@@ -2841,13 +2866,8 @@ mod tool_id_correlation_tests {
         let messages = content_part_exchange("call.a:1", "");
 
         // Act
-        let out = translate_messages_untallied(
-            "anthropic",
-            &messages,
-            SystemTurnPolicy::Lift,
-            &mut passthrough_tally(),
-        )
-        .expect("translation must not error");
+        let out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Lift)
+            .expect("translation must not error");
 
         // Assert
         assert_eq!(tool_use_id(&out), "esc_call_2ea_3a1");
@@ -2885,7 +2905,7 @@ mod tool_id_correlation_tests {
 
 #[cfg(test)]
 mod role_other_egress_tests {
-    use super::{AnthropicRole, SystemTurnPolicy, passthrough_tally, translate_messages_untallied};
+    use super::{AnthropicRole, SystemTurnPolicy, translate_messages_untallied};
     use crate::anthropic_api::types::AnthropicMessage;
     use routectl_core::{Message, MessageContent, Role};
 
@@ -2931,13 +2951,8 @@ mod role_other_egress_tests {
         // Act
         let mut out = Vec::new();
         let events = routectl_testkit::capture_events(|| {
-            out = translate_messages_untallied(
-                "anthropic",
-                &messages,
-                SystemTurnPolicy::Lift,
-                &mut passthrough_tally(),
-            )
-            .expect("translation must not error");
+            out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Lift)
+                .expect("translation must not error");
         });
 
         // Assert
@@ -2969,13 +2984,8 @@ mod role_other_egress_tests {
         // Act
         let mut out = Vec::new();
         let events = routectl_testkit::capture_events(|| {
-            out = translate_messages_untallied(
-                "anthropic",
-                &messages,
-                SystemTurnPolicy::Lift,
-                &mut passthrough_tally(),
-            )
-            .expect("translation must not error");
+            out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Lift)
+                .expect("translation must not error");
         });
 
         // Assert
@@ -3112,6 +3122,7 @@ mod empty_content_backstop_tests {
                 &req,
                 CoreHistoryReasoning::Auto,
                 SystemTurnPolicy::Lift,
+                &mut passthrough_tally(),
             )
             .expect("normalize must not error");
             // Assert -- the turn is gone.
@@ -3160,6 +3171,7 @@ mod empty_content_backstop_tests {
             &req,
             CoreHistoryReasoning::Auto,
             SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
         )
         .expect("normalize must not error");
 
@@ -3192,6 +3204,7 @@ mod empty_content_backstop_tests {
             &req,
             CoreHistoryReasoning::Auto,
             SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
         )
         .expect("normalize must not error");
         assert_eq!(
@@ -3199,13 +3212,8 @@ mod empty_content_backstop_tests {
             1,
             "a turn with tool_calls is never dropped"
         );
-        let wire = translate_messages_untallied(
-            "anthropic",
-            &normalized,
-            SystemTurnPolicy::Lift,
-            &mut passthrough_tally(),
-        )
-        .expect("translate must not error");
+        let wire = translate_messages_untallied("anthropic", &normalized, SystemTurnPolicy::Lift)
+            .expect("translate must not error");
 
         // Assert -- wire content is a non-empty block array with a ToolUse.
         let AnthropicContent::Blocks(blocks) = &wire[0].content else {
@@ -3239,15 +3247,8 @@ mod empty_content_backstop_tests {
         let mut skips = ReasoningSkipTally::new("anthropic");
         let events = routectl_testkit::capture_events(|| {
             captured = Some(
-                build_assistant_content(
-                    "anthropic",
-                    0,
-                    &msg,
-                    &mut passthrough_tally(),
-                    Carriers::Emit,
-                    &mut skips,
-                )
-                .expect("build must not error"),
+                build_assistant_content("anthropic", 0, &msg, Carriers::Emit, &mut skips)
+                    .expect("build must not error"),
             );
             skips.flush();
         });
@@ -3274,8 +3275,7 @@ mod empty_content_backstop_tests {
 mod tool_use_dedup_tests {
     use super::{
         AnthropicContent, Carriers, ContentBlock, ReasoningSkipTally, SystemTurnPolicy,
-        build_assistant_content, build_tool_message, passthrough_tally,
-        translate_messages_untallied,
+        build_assistant_content, build_tool_message, translate_messages_untallied,
     };
     use crate::anthropic_api::types::AnthropicMessage;
     use routectl_core::{ContentPart, KnownContentPart, Message, MessageContent, Role};
@@ -3287,15 +3287,8 @@ mod tool_use_dedup_tests {
     /// reachable from a tool_use-only message).
     fn assistant_content_of(msg: &Message) -> AnthropicContent {
         let mut skips = ReasoningSkipTally::new("anthropic");
-        build_assistant_content(
-            "anthropic",
-            0,
-            msg,
-            &mut passthrough_tally(),
-            Carriers::Emit,
-            &mut skips,
-        )
-        .expect("build must not error")
+        build_assistant_content("anthropic", 0, msg, Carriers::Emit, &mut skips)
+            .expect("build must not error")
     }
 
     fn tool_use_part(id: &str) -> ContentPart {
@@ -3459,13 +3452,9 @@ mod tool_use_dedup_tests {
         );
 
         // Act -- thread it back through the egress.
-        let out = translate_messages_untallied(
-            "anthropic",
-            &[assistant_msg],
-            SystemTurnPolicy::Lift,
-            &mut passthrough_tally(),
-        )
-        .expect("translate");
+        let out =
+            translate_messages_untallied("anthropic", &[assistant_msg], SystemTurnPolicy::Lift)
+                .expect("translate");
 
         // Assert -- exactly one tool_use block, id preserved.
         let uses = tool_use_blocks(&out[0].content);
@@ -3515,7 +3504,7 @@ mod tool_use_dedup_tests {
     }
 
     fn joined(run: &[&Message]) -> AnthropicMessage {
-        build_tool_message(run, 0, &mut passthrough_tally(), Carriers::Emit).0
+        build_tool_message(run, 0, Carriers::Emit).0
     }
 
     fn tool_result_content(m: &AnthropicMessage) -> &Value {
@@ -3567,7 +3556,7 @@ mod tool_use_dedup_tests {
 
 #[cfg(test)]
 mod tool_result_coalescing_tests {
-    use super::{ContentBlock, SystemTurnPolicy, passthrough_tally, translate_messages_untallied};
+    use super::{ContentBlock, SystemTurnPolicy, translate_messages_untallied};
     use crate::anthropic_api::types::{AnthropicContent, AnthropicMessage, AnthropicRole};
     use routectl_core::{
         CacheControl, ContentPart, KnownContentPart, Message, MessageContent, Role,
@@ -3646,13 +3635,8 @@ mod tool_result_coalescing_tests {
         ];
 
         // Act
-        let out = translate_messages_untallied(
-            "anthropic",
-            &messages,
-            SystemTurnPolicy::Lift,
-            &mut passthrough_tally(),
-        )
-        .expect("translate");
+        let out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Lift)
+            .expect("translate");
 
         // Assert
         assert_eq!(roles(&out), vec!["user", "assistant", "user"]);
@@ -3676,13 +3660,8 @@ mod tool_result_coalescing_tests {
         ];
 
         // Act
-        let out = translate_messages_untallied(
-            "anthropic",
-            &messages,
-            SystemTurnPolicy::Lift,
-            &mut passthrough_tally(),
-        )
-        .expect("translate");
+        let out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Lift)
+            .expect("translate");
 
         // Assert
         assert_eq!(roles(&out), vec!["user", "assistant", "user"]);
@@ -3704,13 +3683,8 @@ mod tool_result_coalescing_tests {
         ];
 
         // Act
-        let out = translate_messages_untallied(
-            "anthropic",
-            &messages,
-            SystemTurnPolicy::Lift,
-            &mut passthrough_tally(),
-        )
-        .expect("translate");
+        let out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Lift)
+            .expect("translate");
 
         // Assert
         assert_eq!(
@@ -3734,13 +3708,8 @@ mod tool_result_coalescing_tests {
         ];
 
         // Act
-        let out = translate_messages_untallied(
-            "anthropic",
-            &messages,
-            SystemTurnPolicy::Lift,
-            &mut passthrough_tally(),
-        )
-        .expect("translate");
+        let out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Lift)
+            .expect("translate");
 
         // Assert
         assert_eq!(roles(&out), vec!["assistant", "user", "user", "user"]);
@@ -3767,13 +3736,8 @@ mod tool_result_coalescing_tests {
         ];
 
         // Act
-        let out = translate_messages_untallied(
-            "anthropic",
-            &messages,
-            SystemTurnPolicy::Lift,
-            &mut passthrough_tally(),
-        )
-        .expect("translate");
+        let out = translate_messages_untallied("anthropic", &messages, SystemTurnPolicy::Lift)
+            .expect("translate");
 
         // Assert
         let AnthropicContent::Blocks(blocks) = &out[1].content else {

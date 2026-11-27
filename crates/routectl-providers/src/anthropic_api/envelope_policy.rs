@@ -2,118 +2,115 @@
 //! egress, plus its per-request DEBUG aggregate.
 //!
 //! The policy lives in its own module because THREE independent sites
-//! construct a `RedactedThinking` block on this lane -- the content-part
-//! walk and the `reasoning_details` replay channel (both in `messages.rs`)
-//! and the context-management cache reinjection (`context_management.rs`).
+//! construct a `RedactedThinking` block on this lane: the content-part
+//! walk and the `reasoning_details` replay channel (both decided in
+//! `messages.rs` `normalize_replay_invariants`) and the context-management
+//! cache reinjection (`context_management.rs`).
 //! A single owner threaded from `request::normalize` is what keeps the
 //! three from drifting, and what keeps the line at one per request rather
 //! than one per site.
 
-/// Constant event name of the aggregated envelope-unwrap DEBUG line. A fixed
-/// token so operators can filter on it without the log line ever carrying
+/// Constant event name of the aggregated DEBUG line. A fixed token so
+/// operators can filter on it without the log line ever carrying
 /// request-derived text.
-const ENVELOPE_UNWRAP_EVENT: &str = "reasoning_envelope_unwrapped";
+const ENVELOPE_OMIT_EVENT: &str = "reasoning_envelope_omitted";
 
-/// Per-request policy + tally for the reasoning-envelope unwrap on the
+/// Per-request policy + tally for routectl reasoning envelopes on the
 /// `redacted_thinking` egress.
 ///
 /// A client history can carry a routectl reasoning envelope
 /// (`routectl_core::reasoning_envelope`) inside a `redacted_thinking`
-/// block: the codec exists because the Anthropic wire has no slot for a
-/// foreign reasoning artifact's id and scheme, so a router hop wraps them
-/// into the opaque `data` field to keep the round trip stateless. Two
-/// egress targets need opposite handling of the same bytes:
+/// block: the Anthropic wire has no slot for a foreign reasoning
+/// artifact's id and scheme, so the Anthropic ingress wraps them into the
+/// opaque `data` field to keep the round trip stateless. Two egress
+/// targets need opposite handling of the same bytes:
 ///
 /// - Another routectl hop, an Anthropic-compatible third-party host, or
 ///   the Bedrock Invoke lane: the envelope MUST ride through
-///   byte-for-byte. It is how reasoning continuity survives the hop, and
-///   a strip here breaks a working path on every request.
-/// - The terminal Anthropic host: the envelope is a routectl-internal
-///   framing, so what ships is the unwrapped INNER BLOB -- exactly the
-///   bytes the caller would have sent with no routectl in the path.
-///   Upstream behavior for a `redacted_thinking` blob that upstream did
-///   not itself mint is UNPROBED; nothing here claims anything about it,
-///   and unwrapping is the only replacement that invents no upstream
-///   claim and discards no replay state.
+///   byte-for-byte. It is how reasoning continuity survives the hop.
+/// - The terminal Anthropic host: an envelope only ever wraps an artifact
+///   another lane minted, and that host answers 400 to a
+///   `redacted_thinking` blob it did not issue. Neither the envelope nor
+///   its inner blob can ship, so the whole block is omitted and that
+///   turn's hidden reasoning is lost on the lane switch. This is the same
+///   rule `is_anthropic_emittable_detail` applies to a format-tagged
+///   foreign detail.
+///
+/// A string that is not a recognized envelope (a native Anthropic blob, a
+/// malformed or unknown-version string) ships unchanged everywhere: the
+/// codec's `unwrap` is total and answers `None` for it.
 ///
 /// The discriminator is resolved ONCE at the client boundary (where the
 /// provider's `base_url` lives) and carried here as a plain bool, so no
 /// per-block decision re-derives it.
 ///
 /// Every site that constructs a TYPED `redacted_thinking` block on this
-/// lane routes its `data` through [`Self::wire_data`]; a site that assigns
-/// the field directly bypasses both the policy and the tally, so the wire
-/// would diverge per channel while the log claimed a lower count.
+/// lane asks [`Self::omit`] first: the replay-invariant pass for content
+/// parts and `reasoning_details` (so a turn the omission empties is
+/// dropped before translation rather than shipped as `content: []`), and
+/// the cache reinjection for a cached detail. A site that skips it ships
+/// the envelope to a host that rejects it.
 ///
 /// Deliberately outside that set: a caller-supplied `redacted_thinking`
 /// whose `data` is not a JSON string (or is absent) does not deserialize
-/// into the typed part at all -- it lands in the untagged passthrough
-/// variant and is re-emitted verbatim. No envelope can hide there: the
-/// canonical field is a `String`, and an envelope is a string by
-/// construction, so such a value could never have carried one.
+/// into the typed part at all; it lands in the untagged passthrough
+/// variant and is re-emitted verbatim. No envelope can hide there: an
+/// envelope is a string by construction.
 ///
 /// Log hygiene, absolute: the blob, the claimed scheme, the claimed
 /// artifact id, and any digest of those NEVER reach a log field at any
-/// level. Scheme and id are client-minted claims that carry no authority
-/// (see the envelope module), so logging them would be both a hygiene
-/// breach and misleading. One aggregated DEBUG line per request carries a
-/// constant event name, the provider id, and a count -- a history can hold
-/// unbounded reasoning blocks, so a per-block line would be a log
-/// amplifier driven by request content.
-pub struct EnvelopeUnwrapTally<'a> {
+/// level. One aggregated DEBUG line per request carries a constant event
+/// name, the provider id, and a count; a history can hold unbounded
+/// reasoning blocks, so a per-block line would be a log amplifier driven
+/// by request content.
+pub struct ForeignEnvelopeTally<'a> {
     provider: &'a str,
     terminal_anthropic_host: bool,
-    unwrapped: usize,
+    omitted: usize,
 }
 
-impl<'a> EnvelopeUnwrapTally<'a> {
+impl<'a> ForeignEnvelopeTally<'a> {
     pub const fn new(provider: &'a str, terminal_anthropic_host: bool) -> Self {
         Self {
             provider,
             terminal_anthropic_host,
-            unwrapped: 0,
+            omitted: 0,
         }
     }
 
-    /// The `redacted_thinking` `data` bytes to put on the wire.
-    ///
-    /// Returns `data` unchanged for every non-terminal target and for
-    /// every input that is not a well-formed envelope of a recognized
-    /// version -- `unwrap` is total and answers `None` for a malformed or
-    /// unknown-version string, which is the verbatim-passthrough answer.
-    /// The inner blob is never decoded, trimmed, or otherwise inspected:
-    /// byte-identity is load-bearing for prompt-cache affinity upstream.
-    pub fn wire_data(&mut self, data: &str) -> String {
-        if !self.terminal_anthropic_host {
-            return data.to_string();
-        }
-        match routectl_core::reasoning_envelope::unwrap(data) {
-            // `unwrap` rejects an empty blob, so a match always yields a
-            // non-empty replacement.
-            Some((_scheme, _id, blob)) => {
-                self.unwrapped += 1;
-                blob.to_string()
-            }
-            None => data.to_string(),
-        }
+    /// Whether a `redacted_thinking` block carrying `data` is omitted on
+    /// this target. Pure: callers that must decide a turn's fate before
+    /// building it ask here without touching the tally.
+    pub fn omits(&self, data: &str) -> bool {
+        self.terminal_anthropic_host && routectl_core::reasoning_envelope::unwrap(data).is_some()
     }
 
-    /// Emit the aggregated DEBUG line, if anything was unwrapped. Called exactly
-    /// once per request, by `request::normalize`, after BOTH message
-    /// translation and context-management reinjection have run -- the two
-    /// feed the same tally, so flushing between them would emit two lines
-    /// for one request.
+    /// [`Self::omits`], counting an omitted block for the DEBUG line. A
+    /// kept block ships its `data` byte for byte: byte-identity is
+    /// load-bearing for prompt-cache affinity upstream.
+    pub fn omit(&mut self, data: &str) -> bool {
+        let omitted = self.omits(data);
+        if omitted {
+            self.omitted += 1;
+        }
+        omitted
+    }
+
+    /// Emit the aggregated DEBUG line, if anything was omitted. Called
+    /// exactly once per request, by `request::normalize`, after BOTH
+    /// message translation and context-management reinjection have run:
+    /// the two feed the same tally, so flushing between them would emit
+    /// two lines for one request.
     pub fn flush(&self) {
-        if self.unwrapped > 0 {
+        if self.omitted > 0 {
             tracing::debug!(
                 provider = self.provider,
-                event = ENVELOPE_UNWRAP_EVENT,
-                unwrapped_count = self.unwrapped,
-                "replacing routectl reasoning envelopes with their inner blob on \
-                 the terminal Anthropic egress: the envelope is router-internal \
-                 framing with no meaning upstream, so the artifact ships as the \
-                 caller originally sent it. Non-terminal targets keep the \
-                 envelope byte-for-byte."
+                event = ENVELOPE_OMIT_EVENT,
+                omitted_count = self.omitted,
+                "omitting redacted_thinking blocks that carry a routectl reasoning \
+                 envelope on the terminal Anthropic egress: the artifact inside was \
+                 minted by another lane and that host rejects it. Non-terminal \
+                 targets keep the envelope byte-for-byte."
             );
         }
     }
@@ -123,6 +120,6 @@ impl<'a> EnvelopeUnwrapTally<'a> {
 /// tests that assert shapes unrelated to the terminal-host envelope
 /// policy. The policy itself has its own end-to-end tests.
 #[cfg(test)]
-pub const fn passthrough_tally() -> EnvelopeUnwrapTally<'static> {
-    EnvelopeUnwrapTally::new("anthropic", false)
+pub const fn passthrough_tally() -> ForeignEnvelopeTally<'static> {
+    ForeignEnvelopeTally::new("anthropic", false)
 }

@@ -762,10 +762,9 @@ const fn anthropic_tool_cache_control(t: &AnthropicTool) -> Option<&routectl_cor
 /// GENUINE Anthropic host. It is the resolved value of
 /// `routectl_core::identity::anthropic::is_anthropic_api_host` on the
 /// egress base_url -- resolved once by the caller that owns the base_url,
-/// never re-derived here or below. It gates exactly one wire-byte
-/// difference: a routectl reasoning envelope inside a `redacted_thinking`
-/// block ships as its unwrapped inner blob on the terminal host and
-/// byte-for-byte everywhere else. Callers with no Anthropic host in play
+/// never re-derived here or below. It gates exactly one wire difference:
+/// a `redacted_thinking` block carrying a routectl reasoning envelope is
+/// omitted on the terminal host and ships byte-for-byte everywhere else. Callers with no Anthropic host in play
 /// (the Bedrock Invoke lane) pass `false`.
 /// Assemble the body and RETURN the deferred `output_config` diagnostics
 /// instead of emitting them, for a caller that owns its own lane and emits
@@ -899,7 +898,11 @@ pub(crate) fn normalize_deferring_format_key_warn(
         .routectl_internal
         .history_reasoning
         .unwrap_or(CoreHistoryReasoning::Auto);
-    let messages = normalize_replay_invariants(id, req, hr, system_turns)?;
+    let mut envelopes = crate::anthropic_api::envelope_policy::ForeignEnvelopeTally::new(
+        id,
+        terminal_anthropic_host,
+    );
+    let messages = normalize_replay_invariants(id, req, hr, system_turns, &mut envelopes)?;
 
     let max_tokens = resolve_max_tokens(req);
     if req.max_tokens.is_none() {
@@ -967,19 +970,8 @@ pub(crate) fn normalize_deferring_format_key_warn(
     });
     let system = super::system::append_system(primary, legacy.flatten());
 
-    let mut envelopes = crate::anthropic_api::envelope_policy::EnvelopeUnwrapTally::new(
-        id,
-        terminal_anthropic_host,
-    );
-    let mut anthropic_messages = translate_messages(
-        id,
-        &messages,
-        system_turns,
-        &mut envelopes,
-        fingerprint,
-        tap,
-        carriers,
-    )?;
+    let mut anthropic_messages =
+        translate_messages(id, &messages, system_turns, fingerprint, tap, carriers)?;
     super::wire_edits::declare_tool_id_sanitize(tap, &req.messages, system_turns);
 
     // When context_management emulation is active, re-inject cached

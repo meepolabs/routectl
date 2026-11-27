@@ -94,6 +94,17 @@ fn with_assistant_parts(parts: Value) -> ChatRequest {
 
 /// An assistant turn carrying a text block then one `tool_use` block per
 /// id, answered by one `tool_result` block per id.
+/// A `redacted_thinking` block carrying a routectl envelope around an
+/// artifact another lane minted.
+fn foreign_envelope_part() -> Value {
+    let data = routectl_core::reasoning_envelope::wrap(
+        routectl_core::CODEX_OAUTH,
+        Some("rs_1"),
+        "rsn_artifact",
+    );
+    json!({"type": "redacted_thinking", "data": data})
+}
+
 fn tool_use_exchange(ids: &[&str]) -> ChatRequest {
     let uses: Vec<Value> = ids
         .iter()
@@ -188,6 +199,25 @@ const ASSEMBLY_ROWS: &[AssemblyRow] = &[
         },
         idle: || with_assistant_parts(json!([{"type": "text", "text": "a"}])),
         expected: &[(EditKind::Remove, "/messages/1/content/0")],
+    },
+    AssemblyRow {
+        name: "foreign reasoning envelope omitted beside text",
+        site: EditSite::HistoryReasoningStrip,
+        firing: || {
+            with_assistant_parts(json!([foreign_envelope_part(), {"type": "text", "text": "a"}]))
+        },
+        idle: || with_assistant_parts(json!([{"type": "text", "text": "a"}])),
+        expected: &[(EditKind::Remove, "/messages/1/content/0")],
+    },
+    AssemblyRow {
+        name: "assistant turn emptied by an omitted envelope dropped",
+        site: EditSite::HistoryReasoningStrip,
+        firing: || with_assistant_parts(json!([foreign_envelope_part()])),
+        idle: || with_assistant_parts(json!([{"type": "text", "text": "a"}])),
+        expected: &[
+            (EditKind::Remove, "/messages/1/content/0"),
+            (EditKind::Remove, "/messages/1"),
+        ],
     },
     AssemblyRow {
         name: "hosted tool withheld at its concrete index",

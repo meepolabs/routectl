@@ -66,6 +66,7 @@ fn normalize_capturing(req: &ChatRequest) -> Vec<CapturedEvent> {
             req,
             CoreHistoryReasoning::Strip,
             SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
         )
         .expect("normalize succeeds");
     })

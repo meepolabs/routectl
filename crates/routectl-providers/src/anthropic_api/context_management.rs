@@ -296,14 +296,14 @@ enum KeepPolicy {
 /// the same validation. Keep them in sync when either function changes.
 ///
 /// `envelopes` carries the request's reasoning-envelope policy, shared
-/// with the message-translation channel: a cached `Encrypted` detail's
-/// `data` is client-origin bytes (the cache stores what a client-supplied
-/// or upstream-observed detail carried), so a wrapped envelope can reach
-/// the wire through this path too, and both paths must feed one tally so
-/// the aggregated WARN stays at one line per request.
+/// with the replay-invariant pass: a cached `Encrypted` detail's `data` is
+/// client-origin bytes (the cache stores what a client-supplied or
+/// upstream-observed detail carried), so a wrapped envelope can reach this
+/// path too. An omitted detail is filtered like a wrong-format one, and
+/// both paths feed one tally so the DEBUG line stays at one per request.
 fn reasoning_detail_to_thinking_block(
     rd: &routectl_core::ReasoningDetail,
-    envelopes: &mut crate::anthropic_api::envelope_policy::EnvelopeUnwrapTally,
+    envelopes: &mut crate::anthropic_api::envelope_policy::ForeignEnvelopeTally,
 ) -> std::option::Option<crate::anthropic_api::types::ContentBlock> {
     use crate::anthropic_api::types::ContentBlock;
     use routectl_core::ReasoningDetailKind;
@@ -327,8 +327,12 @@ fn reasoning_detail_to_thinking_block(
             if rd.format.as_deref() != Some(super::ANTHROPIC_FORMAT) {
                 return None;
             }
+            let data = rd.payload["data"].as_str().unwrap_or("");
+            if envelopes.omit(data) {
+                return None;
+            }
             Some(ContentBlock::RedactedThinking {
-                data: envelopes.wire_data(rd.payload["data"].as_str().unwrap_or("")),
+                data: data.to_string(),
                 cache_control: std::option::Option::None,
                 extras: serde_json::Map::new(),
             })
@@ -360,7 +364,7 @@ pub fn apply_clear_thinking_edit(
     extras: std::option::Option<&serde_json::Value>,
     cache: &std::sync::RwLock<ThinkingCache>,
     provider_id: &str,
-    envelopes: &mut crate::anthropic_api::envelope_policy::EnvelopeUnwrapTally,
+    envelopes: &mut crate::anthropic_api::envelope_policy::ForeignEnvelopeTally,
 ) -> ApplyResult {
     use crate::anthropic_api::types::AnthropicContent;
 
@@ -520,7 +524,7 @@ fn inject_thinking_into_message(
     cache: &std::sync::RwLock<ThinkingCache>,
     provider_id: &str,
     missed_tool_ids: &mut Vec<String>,
-    envelopes: &mut crate::anthropic_api::envelope_policy::EnvelopeUnwrapTally,
+    envelopes: &mut crate::anthropic_api::envelope_policy::ForeignEnvelopeTally,
 ) {
     use crate::anthropic_api::types::ContentBlock;
 
@@ -579,7 +583,7 @@ fn try_inject_thinking_at(
     cache: &std::sync::RwLock<ThinkingCache>,
     provider_id: &str,
     missed_tool_ids: &mut Vec<String>,
-    envelopes: &mut crate::anthropic_api::envelope_policy::EnvelopeUnwrapTally,
+    envelopes: &mut crate::anthropic_api::envelope_policy::ForeignEnvelopeTally,
 ) -> usize {
     use crate::anthropic_api::types::ContentBlock;
 

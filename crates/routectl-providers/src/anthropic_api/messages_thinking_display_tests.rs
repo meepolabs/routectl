@@ -38,6 +38,7 @@ fn empty_thinking_text_with_a_claude_signature_survives_the_replay_strip() {
             &req,
             CoreHistoryReasoning::Strip,
             SystemTurnPolicy::Lift,
+            &mut passthrough_tally(),
         )
         .expect("normalize succeeds");
 

@@ -66,13 +66,8 @@ fn system_turn() -> Message {
 /// turn's helper) is the point: the aggregation is per outbound attempt.
 fn warns_for(messages: &[Message]) -> Vec<CapturedEvent> {
     let events = capture_events(|| {
-        translate_messages_untallied(
-            "prov-test",
-            messages,
-            SystemTurnPolicy::Lift,
-            &mut passthrough_tally(),
-        )
-        .expect("translation ok");
+        translate_messages_untallied("prov-test", messages, SystemTurnPolicy::Lift)
+            .expect("translation ok");
     });
     events
         .into_iter()
@@ -748,19 +743,13 @@ fn unrecognized_kind_drops_silently_with_no_warn_and_no_block() {
         index: Some(1),
         payload: json!({"text": "some future payload"}),
     };
-    let mut envelopes = passthrough_tally();
     let messages = vec![assistant_turn(vec![recognized, unrecognized])];
 
     // Act
     let mut translated = Vec::new();
     let events = capture_events(|| {
-        translated = translate_messages_untallied(
-            "prov-test",
-            &messages,
-            SystemTurnPolicy::Lift,
-            &mut envelopes,
-        )
-        .expect("translation ok");
+        translated = translate_messages_untallied("prov-test", &messages, SystemTurnPolicy::Lift)
+            .expect("translation ok");
     });
 
     // Assert

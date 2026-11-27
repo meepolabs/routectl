@@ -1137,10 +1137,11 @@ mod principal_403_tests;
 #[path = "mod_upstream_warn_scrub_tests.rs"]
 mod upstream_warn_scrub_tests;
 
-// Host-gated reasoning-envelope unwrap on the redacted_thinking egress.
+// Host-gated omission of a foreign reasoning envelope on the redacted_thinking
+// egress.
 #[cfg(test)]
-#[path = "mod_envelope_unwrap_tests.rs"]
-mod envelope_unwrap_tests;
+#[path = "mod_foreign_envelope_tests.rs"]
+mod foreign_envelope_tests;
 
 // This lane's request-volume denominator and the per-request policy action
 // for the withheld client fingerprint.
