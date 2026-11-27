@@ -715,7 +715,8 @@ license.
   WARN emitter; its `pub` `#[cfg(test)]` `tests` module holds the
   planted-credential fixtures and checks other lanes' tests share
 - `src/stream_completion.rs` -- `StreamCompletion`: shared end-of-stream
-  verdict for lanes whose wire closes each turn with a terminal event; each
+  verdict for lanes whose wire closes each turn with a terminal event
+  (anthropic-api, openai-responses, bedrock invoke and converse, gemini); each
   lane injects its own predicate, and a stream that ends before it yields a
   status-0 `Upstream` error instead of a clean close; `missing_terminal`
   builds that error, also used directly by the openai-compat stream
@@ -725,7 +726,9 @@ license.
   `record_missing_terminal` that bumps it with the request's slot; per-thread
   under `cfg(test)`
 - `src/stream_terminal_observation_tests.rs` -- cross-lane guard: a cut
-  stream counts once on slot and total per terminal-checked lane; a
+  stream counts once on slot and total per terminal-checked lane
+  (anthropic-api, openai-responses, bedrock invoke and converse,
+  openai-compat, gemini); a
   terminated stream, a consumer drop before the end, and an openai-compat
   mid-tool-call cut count nothing
 - `src/carried_excerpt_scrub_tests.rs` -- cross-lane upstream-error excerpt
@@ -1401,7 +1404,8 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   dispatches `complete`/`stream` to the api-key or cloud-code arm by
   `GeminiAuthMode`; builds the `models/{model}:generateContent` /
   `:streamGenerateContent?alt=sse` URLs and the `GEMINI_FORMAT` (`gemini-v1`)
-  reasoning tag; SSE drain; `resolve_lock` single-flight serializing cold
+  reasoning tag; SSE drain (end-of-stream checked by the shared
+  `StreamCompletion`); `resolve_lock` single-flight serializing cold
   Cloud Code project resolution (warm path reads the cache lock-free, then
   double-checks under the lock before onboarding once); an operator-configured
   `cloud_project_id` short-circuits resolution ahead of the cache with a
@@ -1481,7 +1485,9 @@ Native Google Gemini egress (`generateContent` / `streamGenerateContent`,
   stamps `usage_input_source` as `ExplicitFinal` when the terminal event
   carried its own usage, `InterimCarry` when an earlier report was folded in;
   `parse_data_line` maps a populated in-band `error` object to
-  `Error::Upstream` (benign `error: null` / `{}` pass through)
+  `Error::Upstream` (benign `error: null` / `{}` pass through);
+  `is_terminal_event` (a candidate `finishReason` or a prompt-level block) is
+  the lane's terminal predicate; tool-call ids carry a per-response prefix
 - `src/gemini/sse_tests.rs` -- streaming-path unit tests for the SSE parser
 
 ### bedrock
