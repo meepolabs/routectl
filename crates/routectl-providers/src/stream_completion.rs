@@ -12,11 +12,19 @@
 //! end-of-stream IS the terminator would be flagged on every healthy stream.
 
 use routectl_core::Error;
-#[cfg(any(feature = "anthropic-api", feature = "openai-responses"))]
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-responses",
+    feature = "gemini"
+))]
 use routectl_core::RequestObservation;
 
 /// Per-stream record of whether the lane's terminal event has arrived.
-#[cfg(any(feature = "anthropic-api", feature = "openai-responses"))]
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-responses",
+    feature = "gemini"
+))]
 pub struct StreamCompletion<E: ?Sized> {
     lane: &'static str,
     is_terminal: fn(&E) -> bool,
@@ -24,7 +32,11 @@ pub struct StreamCompletion<E: ?Sized> {
     observation: Option<RequestObservation>,
 }
 
-#[cfg(any(feature = "anthropic-api", feature = "openai-responses"))]
+#[cfg(any(
+    feature = "anthropic-api",
+    feature = "openai-responses",
+    feature = "gemini"
+))]
 impl<E: ?Sized> StreamCompletion<E> {
     /// Track one stream for `lane`, treating an event as terminal when
     /// `is_terminal` accepts it.
@@ -76,7 +88,14 @@ pub fn missing_terminal(lane: &str, provider_id: &str) -> Error {
     )
 }
 
-#[cfg(all(test, any(feature = "anthropic-api", feature = "openai-responses")))]
+#[cfg(all(
+    test,
+    any(
+        feature = "anthropic-api",
+        feature = "openai-responses",
+        feature = "gemini"
+    )
+))]
 mod tests {
     use super::*;
 

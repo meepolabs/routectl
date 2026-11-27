@@ -97,7 +97,7 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
     ("bedrock/invoke.rs", 3),
     ("gemini/cloudcode.rs", 2),
     ("gemini/mod.rs", 1),
-    ("gemini/request.rs", 23),
+    ("gemini/request.rs", 22),
     ("gemini/schema.rs", 7),
     ("openai_compat/request.rs", 16),
     ("openai_compat/wire_lift/content.rs", 6),
@@ -123,7 +123,7 @@ const EXPECTED_MARKERS_PER_FILE: &[(&str, usize)] = &[
 /// counted arm relabelled `structural` keeps the per-file total unchanged.
 const EXPECTED_LANE_MARKERS: usize = 104;
 const EXPECTED_POLICY_ACTION_MARKERS: usize = 26;
-const EXPECTED_STRUCTURAL_MARKERS: usize = 52;
+const EXPECTED_STRUCTURAL_MARKERS: usize = 51;
 
 /// The `fidelity-risk` register: a same-dialect-reachable candidate, which is
 /// a worse defect to be FILED rather than an accepted drop. Pinned by CONTENT

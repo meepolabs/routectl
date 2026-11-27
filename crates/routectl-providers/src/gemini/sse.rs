@@ -23,6 +23,7 @@
 //! Reference: <https://ai.google.dev/api/generate-content>
 
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use routectl_core::{
     ChatChunk, Error, ReasoningDetail, ReasoningDetailKind, Result, Role, UpstreamMeta,
@@ -53,6 +54,11 @@ pub struct GeminiStreamState {
     role_emitted: bool,
     /// Dense counter for OpenAI-shape `tool_calls[].index`.
     next_call_index: u32,
+    /// Per-response tool-call id prefix, minted at the first functionCall.
+    /// Gemini sends no call id, and an index alone repeats every turn, so a
+    /// client correlating results by id would pair a result with an earlier
+    /// turn's call.
+    call_id_prefix: Option<String>,
     /// Dense counter for `reasoning_details[].index`.
     next_detail_index: u32,
     /// Sticky: set once any functionCall part is seen, so the terminal
@@ -68,11 +74,6 @@ pub struct GeminiStreamState {
     /// its own usage; the latest write wins, so a terminal event's own
     /// usage supersedes an interim value with no double-count.
     cached_usage: Option<UsageMetadata>,
-    /// Set once termination is proven: any event carried a `finishReason`,
-    /// or a prompt-level block arrived (empty candidates + blockReason).
-    /// Distinguishes a proven-terminal stream from one that ends at EOS
-    /// without proof, which is the only case `on_eos` WARNs on.
-    saw_finish_reason: bool,
 }
 
 impl GeminiStreamState {
@@ -109,13 +110,16 @@ impl GeminiStreamState {
         }
 
         let candidate = event.candidates.into_iter().next();
-        let finish_reason_raw = candidate.as_ref().and_then(|c| c.finish_reason.clone());
+        let finish_reason_raw = candidate
+            .as_ref()
+            .and_then(|c| c.finish_reason.clone())
+            .filter(|r| is_terminal_reason(r));
         let has_candidate = candidate.is_some();
         let prompt_block = event
             .prompt_feedback
             .as_ref()
             .and_then(|pf| pf.block_reason.as_deref())
-            .filter(|r| !r.is_empty())
+            .filter(|r| is_terminal_reason(r))
             .map(str::to_string);
 
         if let Some(cand) = candidate {
@@ -140,7 +144,6 @@ impl GeminiStreamState {
         // usage-interim / finishReason-terminal shape does not lose the
         // count, and a self-usage terminal is not double-counted.
         if finish_reason_raw.is_some() {
-            self.saw_finish_reason = true;
             self.terminal_emitted = true;
             let usage = self.cached_usage.take();
             let finish = map_finish_reason(finish_reason_raw.as_deref(), self.saw_function_call);
@@ -156,10 +159,7 @@ impl GeminiStreamState {
             chunks.push(self.terminal_chunk(finish, usage, event_reported_usage));
         } else if !has_candidate && let Some(reason) = prompt_block {
             // Prompt-level block: no finishReason and no candidate, but
-            // promptFeedback.blockReason is present. This is PROVEN
-            // terminality, so mark saw_finish_reason too -- on_eos must not
-            // WARN about a stream that ended without a finishReason.
-            self.saw_finish_reason = true;
+            // promptFeedback.blockReason is present.
             self.terminal_emitted = true;
             let usage = self.cached_usage.take();
             tracing::debug!(
@@ -179,19 +179,15 @@ impl GeminiStreamState {
         Ok(chunks)
     }
 
-    /// Called once the SSE stream reaches end-of-stream. Emits the
-    /// anomaly WARN when usage was observed but no `finishReason` ever
-    /// arrived: the stream ended without proven terminality, so silent
-    /// truncation must not masquerade as success. Usage still settles via
-    /// the ingress capture path; this WARN is the only signal.
+    /// Called when the transport ended before any terminal event (see
+    /// [`is_terminal_event`]). Whether usage had arrived tells a cut reply
+    /// apart from one that stopped before any accounting.
     pub(crate) fn on_eos(&self, provider_id: &str) {
-        if !self.saw_finish_reason && self.cached_usage.is_some() {
-            tracing::warn!(
-                provider = %provider_id,
-                had_cached_usage = true,
-                "gemini: stream ended with usage but no finishReason"
-            );
-        }
+        tracing::warn!(
+            provider = %provider_id,
+            had_cached_usage = self.cached_usage.is_some(),
+            "gemini: stream ended without a finishReason"
+        );
     }
 
     fn part_chunks(&mut self, provider_id: &str, part: &ResponsePart) -> Vec<ChatChunk> {
@@ -266,15 +262,19 @@ impl GeminiStreamState {
     }
 
     fn tool_chunk(
-        &self,
+        &mut self,
         name: &str,
         call_index: u32,
         args: String,
         signature: Option<&str>,
     ) -> ChatChunk {
+        let prefix = self
+            .call_id_prefix
+            .get_or_insert_with(|| format!("call_{}", Uuid::now_v7().simple()));
+        let id = format!("{prefix}_{call_index}");
         let mut tool_call_delta: Value = json!({
             "index": call_index,
-            "id": format!("call_{call_index}"),
+            "id": id,
             "type": "function",
             "function": {"name": name, "arguments": args}
         });
@@ -343,6 +343,31 @@ impl GeminiStreamState {
             upstream_meta: None,
         }
     }
+}
+
+/// Whether `event` ends the response: a candidate `finishReason`, or a
+/// prompt-level block on an event with no candidate. Gemini's SSE has no
+/// end-of-stream event, so this is the only proof a stream was not cut;
+/// it mirrors the two terminal branches of `parse_event`.
+pub fn is_terminal_event(event: &GenerateContentResponse) -> bool {
+    match event.candidates.first() {
+        Some(candidate) => candidate
+            .finish_reason
+            .as_deref()
+            .is_some_and(is_terminal_reason),
+        None => event
+            .prompt_feedback
+            .as_ref()
+            .and_then(|pf| pf.block_reason.as_deref())
+            .is_some_and(is_terminal_reason),
+    }
+}
+
+/// Whether a `finishReason` / `blockReason` value ends the response. The
+/// proto default (`FINISH_REASON_UNSPECIFIED`, `BLOCK_REASON_UNSPECIFIED`)
+/// and an empty string are what an unset enum serializes as, not a reason.
+fn is_terminal_reason(reason: &str) -> bool {
+    !reason.is_empty() && !reason.ends_with("_UNSPECIFIED")
 }
 
 /// Map Gemini `usageMetadata` to a canonical streaming `UsageDelta`.

@@ -185,7 +185,8 @@ pub(crate) mod upstream_log;
 #[cfg(any(
     feature = "anthropic-api",
     feature = "openai-responses",
-    feature = "openai-compat"
+    feature = "openai-compat",
+    feature = "gemini"
 ))]
 pub(crate) mod stream_completion;
 
@@ -428,7 +429,8 @@ mod translation_drop_observation_tests;
     feature = "openai-compat",
     feature = "anthropic-api",
     feature = "openai-responses",
-    feature = "bedrock"
+    feature = "bedrock",
+    feature = "gemini"
 ))]
 mod stream_terminal_observation_tests;
 

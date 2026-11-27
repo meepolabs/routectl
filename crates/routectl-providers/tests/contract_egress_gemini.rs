@@ -15,9 +15,9 @@
 //!     it is pinned to `0` before snapshotting. The workspace `insta`
 //!     build has no `redactions` feature, so field pinning is done by
 //!     hand rather than via a redaction selector.
-//!   - Gemini stream chunks carry deterministic ids (`resp-*` from the
-//!     fixture, `call_<index>` for tool calls), so the SSE chunk
-//!     sequence snapshots as-is.
+//!   - Gemini stream chunk ids are deterministic (`resp-*` from the
+//!     fixture) and the stream fixture carries no tool call, whose id is
+//!     minted per response, so the SSE chunk sequence snapshots as-is.
 
 #![cfg(feature = "gemini")]
 

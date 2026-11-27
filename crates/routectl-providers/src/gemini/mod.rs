@@ -23,6 +23,7 @@ use routectl_core::{
     trace_upstream_success_body, upstream_message_or_excerpt,
 };
 
+use crate::stream_completion::StreamCompletion;
 use crate::upstream_error::{CarriedBody, UpstreamErrorRead};
 
 pub(crate) mod auth;
@@ -566,7 +567,7 @@ impl GeminiProvider {
         }
 
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
-        Ok(self.drain_stream(resp, false))
+        Ok(self.drain_stream(&req, resp, false))
     }
 
     async fn stream_cloud_code(
@@ -614,7 +615,7 @@ impl GeminiProvider {
         }
 
         crate::header_trace::upstream(PROVIDER_KIND, &self.cfg.id, resp.headers());
-        Ok(self.drain_stream(resp, true))
+        Ok(self.drain_stream(&req, resp, true))
     }
 
     /// Drain an SSE response into canonical chunks via the shared Gemini
@@ -622,15 +623,19 @@ impl GeminiProvider {
     /// peeled out of its `{"response": ...}` envelope before parsing.
     fn drain_stream(
         &self,
+        req: &ChatRequest,
         resp: reqwest::Response,
         unwrap_cloud_code: bool,
     ) -> BoxStream<'static, Result<ChatChunk>> {
         let provider_id = self.cfg.id.clone();
+        let observation = req.routectl_internal.observation.clone();
         let byte_stream = resp.bytes_stream();
         let event_stream = byte_stream.eventsource();
 
         let stream = async_stream::stream! {
             let mut state = sse::GeminiStreamState::default();
+            let mut completion = StreamCompletion::new(PROVIDER_KIND, sse::is_terminal_event)
+                .with_observation(observation);
             futures::pin_mut!(event_stream);
             while let Some(result) = event_stream.next().await {
                 match result {
@@ -655,6 +660,7 @@ impl GeminiProvider {
                                 return;
                             }
                         };
+                        completion.observe(&parsed);
                         match state.parse_event(&provider_id, parsed) {
                             Err(e) => {
                                 yield Err(e);
@@ -669,7 +675,10 @@ impl GeminiProvider {
                     }
                 }
             }
-            state.on_eos(&provider_id);
+            if let Err(e) = completion.end_of_stream(&provider_id) {
+                state.on_eos(&provider_id);
+                yield Err(e);
+            }
         };
 
         routectl_core::wrap_stream_with_summary(
@@ -1223,6 +1232,107 @@ mod e2e_tests {
                 .and_then(|c| c.choices[0].finish_reason.as_deref()),
             Some("stop")
         );
+    }
+
+    async fn drain_api_key_stream(sse_body: &'static str) -> Vec<Result<ChatChunk>> {
+        use futures::StreamExt;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/models/gemini-2.5-pro:streamGenerateContent"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+        let mut req = base_req();
+        req.stream = Some(true);
+
+        provider
+            .stream(req)
+            .await
+            .expect("stream open")
+            .collect()
+            .await
+    }
+
+    const CONTENT_EVENT: &str = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}],\"role\":\"model\"},\"index\":0}],\"responseId\":\"resp-cut\"}\n\n";
+
+    #[tokio::test]
+    async fn stream_ending_without_a_finish_reason_ends_with_an_error() {
+        let rows: [(&str, &'static str); 2] = [
+            ("content without usage", CONTENT_EVENT),
+            (
+                "content then a usage-only event",
+                concat!(
+                    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}],\"role\":\"model\"},\"index\":0}],\"responseId\":\"resp-cut\"}\n\n",
+                    "data: {\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":1,\"totalTokenCount\":6}}\n\n",
+                ),
+            ),
+        ];
+        for (name, body) in rows {
+            // Act
+            let items = drain_api_key_stream(body).await;
+
+            // Assert: the content is delivered, then the stream fails.
+            let (last, earlier) = items.split_last().expect("at least one item");
+            match last {
+                Err(Error::Upstream { status, body, .. }) => {
+                    assert_eq!(*status, 0, "{name}");
+                    assert_eq!(
+                        body, "gemini: stream ended without a terminal event",
+                        "{name}"
+                    );
+                }
+                other => panic!("{name}: expected the missing-terminal error, got {other:?}"),
+            }
+            let text: String = earlier
+                .iter()
+                .map(|item| item.as_ref().expect("content before the end stays Ok"))
+                .flat_map(|c| c.choices.iter())
+                .filter_map(|ch| ch.delta.content.clone())
+                .collect();
+            assert_eq!(text, "partial", "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_ending_on_a_finish_reason_or_prompt_block_ends_cleanly() {
+        let rows: [(&str, &'static str, &str); 2] = [
+            (
+                "finishReason",
+                concat!(
+                    "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}],\"role\":\"model\"},\"index\":0}],\"responseId\":\"resp-cut\"}\n\n",
+                    "data: {\"candidates\":[{\"content\":{\"parts\":[],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}]}\n\n",
+                ),
+                "stop",
+            ),
+            (
+                "prompt block",
+                "data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"responseId\":\"resp-cut\"}\n\n",
+                "content_filter",
+            ),
+        ];
+        for (name, body, finish) in rows {
+            // Act
+            let items = drain_api_key_stream(body).await;
+
+            // Assert
+            let chunks: Vec<&ChatChunk> = items
+                .iter()
+                .map(|item| item.as_ref().expect("a terminated stream is error-free"))
+                .collect();
+            assert_eq!(
+                chunks
+                    .last()
+                    .and_then(|c| c.choices[0].finish_reason.as_deref()),
+                Some(finish),
+                "{name}"
+            );
+        }
     }
 
     #[test]

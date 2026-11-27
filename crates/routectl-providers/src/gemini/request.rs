@@ -527,7 +527,7 @@ fn build_contents(
     fingerprint: &mut ClientFingerprintStripTally,
 ) -> Result<Vec<Content>> {
     let mut contents: Vec<Content> = Vec::new();
-    let tool_name_by_id = build_tool_call_name_index(req);
+    let mut tool_name_by_id: HashMap<String, String> = HashMap::new();
 
     for msg in &*req.messages {
         match &msg.role {
@@ -545,6 +545,7 @@ fn build_contents(
                 }
             }
             Role::Assistant => {
+                index_tool_call_names(msg, &mut tool_name_by_id);
                 // Reasoning replay: Gemini-origin thinking is echoed back
                 // as thought parts (carrying the thoughtSignature) ahead of
                 // the visible output, so the model can continue its prior
@@ -660,48 +661,40 @@ fn withhold_developer_billing_block<'m>(
     crate::system_filter::without_billing_attribution(msg).map(std::borrow::Cow::Owned)
 }
 
-/// Build a `correlation-id -> tool-name` index over every tool call in the
-/// request. Gemini keys `functionResponse` on the tool NAME, but cross-dialect
+/// Record an assistant turn's tool calls in the `correlation-id -> tool-name`
+/// index. Gemini keys `functionResponse` on the tool NAME, but cross-dialect
 /// tool loops (OpenAI tool-role, Anthropic tool_result) carry only the
 /// correlation id on the result message. Both assistant tool-call shapes are
 /// indexed: the OpenAI `tool_calls` array (`{id, function:{name}}`) and
-/// Anthropic `tool_use` content blocks (`{id, name}`).
-fn build_tool_call_name_index(req: &ChatRequest) -> HashMap<String, String> {
-    let mut index: HashMap<String, String> = HashMap::new();
-    for msg in &*req.messages {
-        // TRANSLATION-DROP: structural -- only an assistant turn can carry a tool call to index; this builds a lookup and emits no wire content
-        if !matches!(msg.role, Role::Assistant) {
-            continue;
-        }
-        if let Some(tool_calls) = &msg.tool_calls {
-            for tc in tool_calls {
-                let id = tc.get("id").and_then(Value::as_str);
-                let name = tc
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(Value::as_str);
-                if let (Some(id), Some(name)) = (id, name)
-                    && !id.is_empty()
-                    && !name.is_empty()
-                {
-                    index
-                        .entry(id.to_string())
-                        .or_insert_with(|| name.to_string());
-                }
-            }
-        }
-        if let MessageContent::Parts(parts) = &msg.content {
-            for part in parts {
-                if let ContentPart::Known(KnownContentPart::ToolUse { id, name, .. }) = part
-                    && !id.is_empty()
-                    && !name.is_empty()
-                {
-                    index.entry(id.clone()).or_insert_with(|| name.clone());
-                }
+/// Anthropic `tool_use` content blocks (`{id, name}`). Clients reuse ids
+/// across turns, so a later call overwrites an earlier one: a result then
+/// resolves to the nearest preceding call with its id.
+fn index_tool_call_names(msg: &Message, index: &mut HashMap<String, String>) {
+    if let Some(tool_calls) = &msg.tool_calls {
+        for tc in tool_calls {
+            let id = tc.get("id").and_then(Value::as_str);
+            let name = tc
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str);
+            if let (Some(id), Some(name)) = (id, name)
+                && !id.is_empty()
+                && !name.is_empty()
+            {
+                index.insert(id.to_string(), name.to_string());
             }
         }
     }
-    index
+    if let MessageContent::Parts(parts) = &msg.content {
+        for part in parts {
+            if let ContentPart::Known(KnownContentPart::ToolUse { id, name, .. }) = part
+                && !id.is_empty()
+                && !name.is_empty()
+            {
+                index.insert(id.clone(), name.clone());
+            }
+        }
+    }
 }
 
 /// Resolve the Gemini `functionResponse.name` for a tool-result message.
@@ -836,8 +829,13 @@ fn content_part_to_part(
                 // `DATA:` is the same scheme as `data:`. Matching only the
                 // lowercase spelling would send a legal mixed-case data URI
                 // down the text fall-through -- the exact billed-as-prose
-                // failure this guard exists to prevent.
-                if url.len() >= 5 && url[..5].eq_ignore_ascii_case("data:") {
+                // failure this guard exists to prevent. Compared as bytes:
+                // byte 5 of client text need not be a char boundary.
+                if url
+                    .as_bytes()
+                    .get(..5)
+                    .is_some_and(|p| p.eq_ignore_ascii_case(b"data:"))
+                {
                     // A data: URI must never reach the text fall-through:
                     // the whole base64 payload would ship upstream as prose,
                     // billed as input text, with no image and no diagnostic.
@@ -2314,6 +2312,74 @@ mod tests {
             .as_ref()
             .expect("function_response part");
         assert_eq!(fr.name, "canonical_name");
+    }
+
+    #[test]
+    fn reused_tool_call_id_resolves_to_the_nearest_preceding_assistant_call() {
+        fn assistant_calling(name: &str) -> Message {
+            Message {
+                tool_calls: Some(vec![json!({
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": name, "arguments": "{}"}
+                })]),
+                content: MessageContent::Null,
+                ..make_assistant("")
+            }
+        }
+        fn nameless_result() -> Message {
+            Message {
+                role: Role::Tool,
+                tool_call_id: Some("call_0".into()),
+                ..make_user("done")
+            }
+        }
+        // (row, messages, expected functionResponse.name)
+        let rows: [(&str, Vec<Message>, &str); 2] = [
+            (
+                "result after the second call",
+                vec![
+                    make_user("q"),
+                    assistant_calling("read_file"),
+                    make_user("again"),
+                    assistant_calling("write_file"),
+                    nameless_result(),
+                ],
+                "write_file",
+            ),
+            (
+                "result between the two calls",
+                vec![
+                    make_user("q"),
+                    assistant_calling("read_file"),
+                    nameless_result(),
+                    assistant_calling("write_file"),
+                ],
+                "read_file",
+            ),
+        ];
+
+        for (row, messages, expected) in rows {
+            // Arrange
+            let req = ChatRequest {
+                model: "gemini-2.5-pro".into(),
+                messages: messages.into(),
+                ..Default::default()
+            };
+
+            // Act
+            let body = translate("gemini:test", &req).expect("translate ok");
+
+            // Assert
+            let names: Vec<&str> = body
+                .contents
+                .iter()
+                .flat_map(|c| &c.parts)
+                .filter_map(|p| p.function_response.as_ref())
+                .map(|fr| fr.name.as_str())
+                .collect();
+            assert_eq!(names, [expected], "row: {row}");
+        }
     }
 
     #[test]

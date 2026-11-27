@@ -183,6 +183,83 @@ fn two_function_calls_get_dense_indices() {
     assert_eq!(indices, vec![0, 1], "tool-call indices must be dense");
 }
 
+fn tool_call_ids(chunks: &[ChatChunk]) -> Vec<(i64, String)> {
+    chunks
+        .iter()
+        .filter_map(|c| c.choices[0].delta.tool_calls.as_ref())
+        .flatten()
+        .map(|tc| {
+            (
+                tc["index"].as_i64().expect("tool call index"),
+                tc["id"].as_str().expect("tool call id").to_string(),
+            )
+        })
+        .collect()
+}
+
+fn decode_tool_turn(names: &[&str]) -> Vec<(i64, String)> {
+    let mut state = GeminiStreamState::default();
+    let mut chunks = Vec::new();
+    for name in names {
+        chunks.extend(
+            state
+                .parse_event(
+                    PID,
+                    event(vec![fc_part(name, serde_json::json!({}))], None, None),
+                )
+                .expect("parse tool event"),
+        );
+    }
+    chunks.extend(
+        state
+            .parse_event(PID, event(vec![], Some("STOP"), None))
+            .expect("parse terminal"),
+    );
+    tool_call_ids(&chunks)
+}
+
+#[test]
+fn tool_call_ids_differ_between_two_decoded_streams() {
+    // Arrange: two responses that each open with a call at index 0, as two
+    // consecutive turns of one conversation would.
+    let first_turn = decode_tool_turn(&["lookup"]);
+    let second_turn = decode_tool_turn(&["lookup"]);
+
+    // Assert
+    assert_eq!(first_turn[0].0, 0);
+    assert_eq!(second_turn[0].0, 0);
+    assert_ne!(
+        first_turn[0].1, second_turn[0].1,
+        "two responses must not both name their first call the same id"
+    );
+}
+
+#[test]
+fn tool_call_ids_are_distinct_and_wire_safe_within_one_stream() {
+    // Act
+    let ids = decode_tool_turn(&["a", "b", "c"]);
+
+    // Assert: one id per call index, no two calls share one, and every id
+    // is inside the charset and length every egress sends verbatim.
+    let indices: Vec<i64> = ids.iter().map(|(i, _)| *i).collect();
+    assert_eq!(indices, vec![0, 1, 2]);
+    let distinct: std::collections::HashSet<&str> = ids.iter().map(|(_, id)| id.as_str()).collect();
+    assert_eq!(
+        distinct.len(),
+        ids.len(),
+        "ids repeat within one stream: {ids:?}"
+    );
+    for (_, id) in &ids {
+        assert!(
+            id.len() <= 64
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'),
+            "id {id:?} would be rewritten on replay"
+        );
+    }
+}
+
 #[test]
 fn thought_part_streams_reasoning_with_signature() {
     let mut state = GeminiStreamState::default();
@@ -551,60 +628,103 @@ fn terminal_event_own_usage_wins_no_double_count() {
 }
 
 #[test]
-fn eos_with_cached_usage_and_no_finish_reason_warns() {
-    // If the stream reaches EOS having observed usage but no finishReason
-    // ever, termination was never proven -- a WARN must fire so silent
-    // truncation cannot masquerade as success.
-    let events = capture_events(|| {
-        let mut state = GeminiStreamState::default();
-        let _ = state
-            .parse_event(
-                PID,
-                event(
-                    vec![text_part("hi")],
-                    None,
-                    Some(UsageMetadata {
-                        prompt_token_count: 5,
-                        candidates_token_count: 2,
-                        total_token_count: 7,
-                        ..Default::default()
-                    }),
-                ),
-            )
-            .expect("parse usage event");
-        state.on_eos(PID);
-    });
-    let warns: Vec<&CapturedEvent> = events.iter().filter(|e| e.level == Level::WARN).collect();
-    assert_eq!(warns.len(), 1, "exactly one WARN must fire; got {warns:?}");
-    assert_eq!(warns[0].field("provider"), Some(PID));
-    assert_eq!(warns[0].field("had_cached_usage"), Some("true"));
+fn eos_warn_says_whether_usage_had_arrived() {
+    let rows = [
+        (
+            "content only",
+            event(vec![text_part("hi")], None, None),
+            "false",
+        ),
+        (
+            "content with usage",
+            event(vec![text_part("hi")], None, Some(usage_meta(5))),
+            "true",
+        ),
+    ];
+    for (name, ev, had_usage) in rows {
+        // Act
+        let events = capture_events(|| {
+            let mut state = GeminiStreamState::default();
+            let _ = state.parse_event(PID, ev).expect("parse ok");
+            state.on_eos(PID);
+        });
+
+        // Assert
+        let warns: Vec<&CapturedEvent> = events.iter().filter(|e| e.level == Level::WARN).collect();
+        assert_eq!(warns.len(), 1, "{name}: exactly one WARN; got {warns:?}");
+        assert_eq!(warns[0].field("provider"), Some(PID), "{name}");
+        assert_eq!(
+            warns[0].field("had_cached_usage"),
+            Some(had_usage),
+            "{name}"
+        );
+    }
 }
 
 #[test]
-fn eos_after_finish_reason_does_not_warn() {
-    // A clean stream that saw a finishReason must not warn at EOS, even
-    // though usage was observed.
-    let events = capture_events(|| {
-        let mut state = GeminiStreamState::default();
-        let _ = state
-            .parse_event(
-                PID,
-                event(
-                    vec![text_part("hi")],
-                    Some("STOP"),
-                    Some(UsageMetadata {
-                        total_token_count: 7,
-                        ..Default::default()
-                    }),
-                ),
-            )
-            .expect("parse terminal");
-        state.on_eos(PID);
-    });
-    assert!(
-        events.iter().all(|e| e.level != Level::WARN),
-        "a proven-terminal stream must not warn; got {events:?}"
-    );
+fn terminal_event_predicate_matches_the_events_that_end_the_stream() {
+    type Build = fn() -> GenerateContentResponse;
+    let rows: [(&str, Build, bool); 8] = [
+        ("STOP finish", || event(vec![], Some("STOP"), None), true),
+        (
+            "MAX_TOKENS finish with content",
+            || event(vec![text_part("x")], Some("MAX_TOKENS"), None),
+            true,
+        ),
+        ("prompt block", || prompt_block_event("SAFETY"), true),
+        (
+            "content, no finish",
+            || event(vec![text_part("x")], None, None),
+            false,
+        ),
+        (
+            "unspecified finish",
+            || event(vec![], Some("FINISH_REASON_UNSPECIFIED"), None),
+            false,
+        ),
+        (
+            "unspecified prompt block",
+            || prompt_block_event("BLOCK_REASON_UNSPECIFIED"),
+            false,
+        ),
+        (
+            "block reason beside a candidate",
+            || {
+                let mut ev = event(vec![text_part("x")], None, None);
+                ev.prompt_feedback = Some(PromptFeedback {
+                    block_reason: Some("SAFETY".into()),
+                });
+                ev
+            },
+            false,
+        ),
+        (
+            "usage only",
+            || GenerateContentResponse {
+                candidates: vec![],
+                usage_metadata: Some(usage_meta(5)),
+                model_version: None,
+                response_id: None,
+                prompt_feedback: None,
+            },
+            false,
+        ),
+    ];
+    for (name, build, terminal) in rows {
+        // Arrange: the decoder's own verdict on the same event.
+        let emits_terminal = GeminiStreamState::default()
+            .parse_event(PID, build())
+            .expect("parse ok")
+            .iter()
+            .any(|c| c.choices[0].finish_reason.is_some());
+
+        // Act
+        let predicate = is_terminal_event(&build());
+
+        // Assert
+        assert_eq!(predicate, terminal, "{name}");
+        assert_eq!(emits_terminal, terminal, "{name}: decoder disagrees");
+    }
 }
 
 #[test]
@@ -643,7 +763,7 @@ fn candidate_content_filter_finish_reason_maps_terminal() {
 }
 
 #[test]
-fn prompt_block_event_emits_single_content_filter_terminal_and_no_eos_warn() {
+fn prompt_block_event_emits_single_content_filter_terminal() {
     let events = capture_events(|| {
         let mut state = GeminiStreamState::default();
         let ev = GenerateContentResponse {
@@ -671,17 +791,7 @@ fn prompt_block_event_emits_single_content_filter_terminal_and_no_eos_warn() {
             terminals[0].choices[0].finish_reason.as_deref(),
             Some("content_filter")
         );
-        // A prompt block is proven terminality -- on_eos must stay silent.
-        assert!(
-            state.saw_finish_reason,
-            "prompt block sets saw_finish_reason"
-        );
-        state.on_eos(PID);
     });
-    assert!(
-        events.iter().all(|e| e.level != Level::WARN),
-        "a prompt-blocked stream must not warn at EOS; got {events:?}"
-    );
     let blocks: Vec<_> = events
         .iter()
         .filter(|e| e.message.contains("blocked on 200 surface"))
@@ -782,4 +892,90 @@ fn a_stream_prompt_block_reason_is_scrubbed_in_its_debug_line() {
             planted,
         );
     }
+}
+
+fn prompt_block_event(reason: &str) -> GenerateContentResponse {
+    GenerateContentResponse {
+        candidates: vec![],
+        usage_metadata: None,
+        model_version: Some("gemini-2.5-pro".into()),
+        response_id: Some("resp-x".into()),
+        prompt_feedback: Some(PromptFeedback {
+            block_reason: Some(reason.into()),
+        }),
+    }
+}
+
+fn delivered_text_and_finishes(chunks: &[ChatChunk]) -> (String, Vec<String>) {
+    let text = chunks
+        .iter()
+        .filter_map(|c| c.choices[0].delta.content.clone())
+        .collect();
+    let finishes = chunks
+        .iter()
+        .filter_map(|c| c.choices[0].finish_reason.clone())
+        .collect();
+    (text, finishes)
+}
+
+#[test]
+fn unspecified_finish_or_block_reason_does_not_end_the_stream() {
+    let rows: [(&str, GenerateContentResponse); 4] = [
+        (
+            "unspecified finishReason",
+            event(
+                vec![text_part("a")],
+                Some("FINISH_REASON_UNSPECIFIED"),
+                None,
+            ),
+        ),
+        (
+            "empty finishReason",
+            event(vec![text_part("a")], Some(""), None),
+        ),
+        (
+            "unspecified prompt blockReason",
+            prompt_block_event("BLOCK_REASON_UNSPECIFIED"),
+        ),
+        ("empty prompt blockReason", prompt_block_event("")),
+    ];
+    for (name, sentinel) in rows {
+        // Arrange
+        let mut state = GeminiStreamState::default();
+        let mut chunks = Vec::new();
+
+        // Act: the sentinel, then more content, then a real finish.
+        for ev in [
+            sentinel,
+            event(vec![text_part("b")], None, None),
+            event(vec![text_part("c")], Some("MAX_TOKENS"), None),
+        ] {
+            chunks.extend(state.parse_event(PID, ev).expect("parse ok"));
+        }
+
+        // Assert
+        let (text, finishes) = delivered_text_and_finishes(&chunks);
+        assert!(text.ends_with("bc"), "{name}: later content lost: {text:?}");
+        assert_eq!(finishes, vec!["length"], "{name}: wrong terminal");
+    }
+}
+
+#[test]
+fn a_real_prompt_block_still_ends_the_stream() {
+    // Arrange
+    let mut state = GeminiStreamState::default();
+    let mut chunks = Vec::new();
+
+    // Act
+    for ev in [
+        prompt_block_event("SAFETY"),
+        event(vec![text_part("late")], Some("STOP"), None),
+    ] {
+        chunks.extend(state.parse_event(PID, ev).expect("parse ok"));
+    }
+
+    // Assert
+    let (text, finishes) = delivered_text_and_finishes(&chunks);
+    assert_eq!(text, "", "content after a prompt block must be dropped");
+    assert_eq!(finishes, vec!["content_filter"]);
 }

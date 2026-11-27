@@ -254,6 +254,102 @@ fn parseable_data_uri_image_url_survives_and_counts_no_drop() {
     assert_eq!(after - before, 0);
 }
 
+/// Where an `image_url` lands on the wire.
+#[derive(Debug, PartialEq, Eq)]
+enum ImageUrlWire {
+    /// Inline bytes carrying this base64 payload.
+    Inline(&'static str),
+    /// Dropped: neither a text part nor inline data carries it.
+    Dropped,
+    /// Passed through verbatim as a text part.
+    Text,
+}
+
+/// The `text` and `inlineData.data` strings of every emitted part.
+fn emitted_texts_and_inline(body: &Value) -> (Vec<String>, Vec<String>) {
+    let parts = body["contents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|c| c["parts"].as_array().into_iter().flatten());
+    let (mut texts, mut inline) = (Vec::new(), Vec::new());
+    for part in parts {
+        if let Some(t) = part["text"].as_str() {
+            texts.push(t.to_owned());
+        }
+        if let Some(d) = part["inlineData"]["data"].as_str() {
+            inline.push(d.to_owned());
+        }
+    }
+    (texts, inline)
+}
+
+/// The scheme check reads the first five bytes of client text, which need
+/// not end on a char boundary; mixed-case `data:` must still never ship as
+/// prose.
+#[test]
+fn image_url_scheme_check_is_char_boundary_safe_and_case_insensitive() {
+    let rows: [(&str, &str, ImageUrlWire); 7] = [
+        (
+            "4-byte ascii prefix then 2-byte char over byte 5",
+            "data\u{e9}:image/png;base64,iVBORw0KGgo=",
+            ImageUrlWire::Text,
+        ),
+        (
+            "3-byte char straddling byte 5",
+            "abc\u{20ac}def",
+            ImageUrlWire::Text,
+        ),
+        (
+            "4-byte char straddling byte 5",
+            "ht\u{1f600}tps://example.com/a.png",
+            ImageUrlWire::Text,
+        ),
+        (
+            "uppercase scheme, parseable",
+            "DATA:image/png;base64,iVBORw0KGgo=",
+            ImageUrlWire::Inline("iVBORw0KGgo="),
+        ),
+        (
+            "mixed-case scheme, unparseable",
+            "DaTa:image/png,notbase64payload",
+            ImageUrlWire::Dropped,
+        ),
+        (
+            "exactly the scheme and nothing else",
+            "data:",
+            ImageUrlWire::Dropped,
+        ),
+        (
+            "plain https",
+            "https://example.com/cat.png",
+            ImageUrlWire::Text,
+        ),
+    ];
+    for (name, url, expected) in rows {
+        // Arrange
+        let req = req_with_part_beside_text(image_url_part(url), "what is this");
+
+        // Act
+        let body = wire_body(&req);
+
+        // Assert
+        let (texts, inline) = emitted_texts_and_inline(&body);
+        assert!(
+            texts.iter().any(|t| t == "what is this"),
+            "{name}: the text sibling must survive: {body}"
+        );
+        let url_as_text = texts.iter().any(|t| t == url);
+        let observed = match (url_as_text, inline.as_slice()) {
+            (true, []) => ImageUrlWire::Text,
+            (false, []) => ImageUrlWire::Dropped,
+            (false, [data]) if data == "iVBORw0KGgo=" => ImageUrlWire::Inline("iVBORw0KGgo="),
+            _ => panic!("{name}: unexpected wire shape: {body}"),
+        };
+        assert_eq!(observed, expected, "{name}: {body}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // file_no_inline_bytes -- the arm that had a WARN and no test at all
 // ---------------------------------------------------------------------------

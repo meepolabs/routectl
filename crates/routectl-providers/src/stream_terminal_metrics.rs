@@ -9,7 +9,8 @@
 #[cfg(any(
     feature = "anthropic-api",
     feature = "openai-responses",
-    feature = "openai-compat"
+    feature = "openai-compat",
+    feature = "gemini"
 ))]
 use routectl_core::RequestObservation;
 
@@ -23,7 +24,8 @@ pub fn missing_terminal_total() -> u64 {
 #[cfg(any(
     feature = "anthropic-api",
     feature = "openai-responses",
-    feature = "openai-compat"
+    feature = "openai-compat",
+    feature = "gemini"
 ))]
 pub(crate) fn record_missing_terminal(slot: Option<&RequestObservation>) {
     bump_total();
@@ -45,7 +47,8 @@ fn read_total() -> u64 {
     any(
         feature = "anthropic-api",
         feature = "openai-responses",
-        feature = "openai-compat"
+        feature = "openai-compat",
+        feature = "gemini"
     )
 ))]
 fn bump_total() {
@@ -71,7 +74,8 @@ fn read_total() -> u64 {
     any(
         feature = "anthropic-api",
         feature = "openai-responses",
-        feature = "openai-compat"
+        feature = "openai-compat",
+        feature = "gemini"
     )
 ))]
 fn bump_total() {

@@ -27,6 +27,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::anthropic_api::{AnthropicApiConfig, AnthropicApiProvider, CloakConfig};
 use crate::bedrock::{BedrockApiShape, BedrockConfig, BedrockCreds, BedrockProvider, auth};
+use crate::gemini::{GeminiConfig, GeminiProvider};
 use crate::openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 use crate::openai_responses::{OpenAiResponsesConfig, OpenAiResponsesProvider};
 use crate::stream_terminal_metrics::missing_terminal_total;
@@ -63,6 +64,10 @@ const LANES: &[Lane] = &[
     Lane {
         name: "openai-compat",
         open: |req, terminated| Box::pin(open_compat(req, terminated)),
+    },
+    Lane {
+        name: "gemini",
+        open: |req, terminated| Box::pin(open_gemini(req, terminated)),
     },
 ];
 
@@ -314,6 +319,26 @@ async fn open_compat(req: ChatRequest, terminated: bool) -> BoxStream<'static, R
         events.push(compat_chunk(&json!({}), Some("stop")));
     }
     open_compat_body(req, sse(&events)).await
+}
+
+async fn open_gemini(req: ChatRequest, terminated: bool) -> BoxStream<'static, Result<ChatChunk>> {
+    let mut events = vec![json!({"candidates": [{
+        "content": {"parts": [{"text": "hello"}], "role": "model"}, "index": 0
+    }]})];
+    if terminated {
+        events.push(json!({"candidates": [{
+            "content": {"parts": [], "role": "model"}, "finishReason": "STOP", "index": 0
+        }]}));
+    }
+    let route = format!("/models/{}:streamGenerateContent", req.model);
+    let server = serve(&route, sse(&events), "text/event-stream").await;
+    let mut cfg = GeminiConfig::new(PROVIDER_ID, "test-key");
+    cfg.base_url = server.uri();
+    let stream = GeminiProvider::new(cfg)
+        .stream(req)
+        .await
+        .expect("stream opens");
+    holding(server, stream)
 }
 
 async fn drain(stream: BoxStream<'static, Result<ChatChunk>>) -> Vec<Result<ChatChunk>> {
