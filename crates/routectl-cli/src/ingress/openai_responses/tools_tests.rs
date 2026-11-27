@@ -17,6 +17,9 @@ fn parse(body: Value) -> ChatRequest {
     super::super::parse::translate_request(&HeaderMap::new(), body).expect("request parses")
 }
 
+/// Process-global: every test in this binary that parses a colliding
+/// namespace member holds `#[serial(translation_drop_globals)]`, whether it
+/// reads the count or only bumps it.
 fn collision_count() -> u64 {
     routectl_providers::translation_drop_metrics::translation_drop_snapshot()
         .into_iter()
@@ -316,7 +319,7 @@ fn collision_rows() -> Vec<CollisionRow> {
 }
 
 #[test]
-#[serial]
+#[serial(translation_drop_globals)]
 fn a_colliding_member_is_excluded_warned_once_and_counted_once() {
     for row in collision_rows() {
         // Arrange
@@ -357,7 +360,7 @@ fn a_colliding_member_is_excluded_warned_once_and_counted_once() {
 }
 
 #[test]
-#[serial]
+#[serial(translation_drop_globals)]
 fn a_request_without_a_collision_neither_warns_nor_counts() {
     // Arrange: control for the row above.
     let before = collision_count();
@@ -376,7 +379,7 @@ fn a_request_without_a_collision_neither_warns_nor_counts() {
 }
 
 #[test]
-#[serial]
+#[serial(translation_drop_globals)]
 fn a_collision_is_noted_on_the_request_observation_slot() {
     // Arrange
     let mut colliding = parse(collision_rows().remove(0).body);
@@ -422,6 +425,7 @@ fn responses_egress_tools(req: &ChatRequest) -> Value {
 }
 
 #[test]
+#[serial(translation_drop_globals)]
 fn same_dialect_replay_suppresses_exactly_the_flattened_members() {
     let hosted = json!({"type": "web_search"});
     let rows = [

@@ -175,7 +175,7 @@ async fn responses_drops_persisted(body: Bytes) -> Vec<Option<i64>> {
 }
 
 #[tokio::test]
-#[serial_test::serial]
+#[serial_test::serial(translation_drop_globals)]
 async fn a_namespace_name_collision_reaches_the_persisted_row_on_both_paths() {
     for stream in [false, true] {
         // Arrange: the clean body is the control; it shares every other loss.
