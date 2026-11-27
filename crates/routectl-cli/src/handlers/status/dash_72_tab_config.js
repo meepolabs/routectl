@@ -125,8 +125,8 @@
     return fact;
   }
 
-  // Built from its char code: page.rs rejects a quoted literal starting
-  // with a slash.
+  // Built from char codes (47 slash, 92 backslash): page.rs rejects a
+  // quoted literal starting with a slash; the backslash follows suit.
   var PATH_SLASH = String.fromCharCode(47);
   var PATH_BACKSLASH = String.fromCharCode(92);
 

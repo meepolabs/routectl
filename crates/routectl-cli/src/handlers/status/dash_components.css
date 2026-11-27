@@ -50,11 +50,11 @@ td.wrap {
 
 /* ---- sortable column headers ----
 
-   Every header button keeps room for its mark inside its own right padding,
-   so the focus ring encloses the mark and a header never changes width when
-   a mark appears. A right-aligned (numeric) header keeps that room, and
-   draws its mark, before its label instead, so the label ends on the right
-   edge its figures share. */
+   Every header button reserves room for its mark inside its own padding, so
+   the focus ring encloses the mark and a header never changes width when a
+   mark appears. A text header keeps that room after its label; a
+   right-aligned (numeric) header keeps it, and draws its mark, before its
+   label, so the label ends on the right edge its figures share. */
 .sort-btn {
   --sort-mark-room: 1.6em;
   position: relative;
